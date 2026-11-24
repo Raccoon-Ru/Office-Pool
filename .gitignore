@@ -3,6 +3,7 @@
 **/build/
 local.properties
 *.apk
+!/server/releases/cue-club.apk
 *.aab
 *.jks
 *.keystore

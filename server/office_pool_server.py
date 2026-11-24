@@ -42,6 +42,11 @@ WEB_ASSETS = {
     ),
     "/cue-club/icon.jpg": ("icon.jpg", "image/jpeg"),
 }
+WEB_VERSION = hashlib.sha256(
+    b"".join((WEB_ROOT / filename).read_bytes() for filename, _ in WEB_ASSETS.values())
+).hexdigest()
+ANDROID_RELEASES = HERE / "releases"
+ANDROID_APK = ANDROID_RELEASES / "cue-club.apk"
 
 ON_RENDER = os.environ.get("RENDER", "").lower() == "true"
 HOST = os.environ.get("OFFICE_POOL_HOST", "0.0.0.0" if ON_RENDER else "127.0.0.1")
@@ -573,6 +578,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         filename, mime = asset
         raw = (WEB_ROOT / filename).read_bytes()
+        if filename == "index.html":
+            raw = raw.replace(b"__CUE_CLUB_WEB_VERSION__", WEB_VERSION.encode("ascii"))
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(raw)))
@@ -588,7 +595,26 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
 
     def do_HEAD(self) -> None:
-        self.serve_web_asset(urlparse(self.path).path, head=True)
+        path = urlparse(self.path).path
+        if path == "/updates/android/cue-club.apk":
+            self.serve_android_apk(head=True)
+            return
+        self.serve_web_asset(path, head=True)
+
+    def serve_android_apk(self, head: bool = False) -> None:
+        if not ANDROID_APK.is_file():
+            self.send_error(404)
+            return
+        raw = ANDROID_APK.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.android.package-archive")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Content-Disposition", 'attachment; filename="Cue-Club.apk"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if not head:
+            self.wfile.write(raw)
 
     def manage_web_push(self, remove: bool = False) -> None:
         if not WEB_APP_ENABLED:
@@ -629,6 +655,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         url = urlparse(self.path)
         path = url.path
+        if path == "/updates/web":
+            self.send_json(200, {"version": WEB_VERSION})
+            return
+        if path == "/updates/android":
+            manifest = ANDROID_RELEASES / "android.json"
+            release = json.loads(manifest.read_text(encoding="utf-8")) if ANDROID_APK.is_file() and manifest.is_file() else {}
+            self.send_json(200, release)
+            return
+        if path == "/updates/android/cue-club.apk":
+            self.serve_android_apk()
+            return
         if path == "/cue-club" or path.startswith("/cue-club/"):
             self.serve_web_asset(path)
             return

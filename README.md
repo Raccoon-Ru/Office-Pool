@@ -58,6 +58,12 @@ For an existing PC installation, create a fresh verified ZIP with `server/backup
 
 Build the Android APK with `-PcueClubServerUrl=https://YOUR-SERVICE.onrender.com` to make Render the default and update installs using the former default address. Players can also update the server address from **My profile > Settings**.
 
+## Publish an Android update
+
+Increase `versionCode` and `versionName` in `app/build.gradle`. On the signing PC, run `powershell -File server/publish_android_update.ps1` from the repository root. Use the same Android signing key as the installed APKs. Commit the generated `server/releases/cue-club.apk` and `server/releases/android.json` together with the version change and push to `main`. Render serves both after deployment. Users on an update-aware version get a download prompt and approve installation through Android.
+
+The first update-aware APK is available at `https://office-pool.onrender.com/updates/android/cue-club.apk`. Install it once on phones that still use an older version. The iPhone web app prompts users to reload when its deployed files change.
+
 ## Build the APK
 
 From the `my_app` folder, run:

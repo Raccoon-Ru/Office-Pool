@@ -66,6 +66,8 @@ public class MainActivity extends Activity {
     final Handler handler = new Handler(Looper.getMainLooper());
     final ExecutorService io = Executors.newSingleThreadExecutor();
     private final ExecutorService avatarIo = Executors.newFixedThreadPool(2);
+    private long nextUpdateCheck;
+    private int offeredUpdate;
     Runnable poll;
     private final Set<String> openedMatchTimers = new HashSet<>();
     private String timerGameId = "";
@@ -3097,10 +3099,48 @@ public class MainActivity extends Activity {
                     public void run() {
                         if (token.isEmpty()) checkServer();
                         else syncNow();
+                        checkForAppUpdate();
                         handler.postDelayed(this, matchPollingInterval());
                     }
                 };
         handler.post(poll);
+    }
+
+    private void checkForAppUpdate() {
+        long now = SystemClock.elapsedRealtime();
+        if (now < nextUpdateCheck || !timerGameId.isEmpty()) return;
+        nextUpdateCheck = now + 60_000;
+        io.execute(() -> {
+            try {
+                JSONObject release = new OfficeApi(DEFAULT_SERVER_URL).get("/updates/android", "");
+                int version = release.optInt("versionCode");
+                String name = release.optString("versionName");
+                runOnUiThread(() -> {
+                    if (!foreground || isFinishing() || isDestroyed() || !timerGameId.isEmpty()) return;
+                    nextUpdateCheck = SystemClock.elapsedRealtime() + 15 * 60_000;
+                    if (version <= Math.max(BuildConfig.VERSION_CODE, offeredUpdate) || name.isEmpty()) return;
+                    offeredUpdate = version;
+                    new AlertDialog.Builder(this)
+                            .setTitle("Cue Club update available")
+                            .setMessage("Version " + name + " is ready. Download the APK, then open it to install the update.")
+                            .setNegativeButton("Later", null)
+                            .setPositiveButton("Download", (dialog, which) -> downloadAppUpdate())
+                            .show();
+                });
+            } catch (Exception ignored) {
+                // Try again after the retry interval when the update server is reachable.
+            }
+        });
+    }
+
+    private void downloadAppUpdate() {
+        Uri apk = Uri.parse(DEFAULT_SERVER_URL + "/updates/android/cue-club.apk");
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, apk));
+        } catch (ActivityNotFoundException e) {
+            offeredUpdate = 0;
+            Toast.makeText(this, "Open a browser to download the Cue Club update.", Toast.LENGTH_LONG).show();
+        }
     }
 
     private long matchPollingInterval() {

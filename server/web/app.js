@@ -2,6 +2,9 @@
 
 const app = document.querySelector("#app"), header = document.querySelector("#header"),
   nav = document.querySelector("#tabs"), status = document.querySelector("#status");
+const updateNotice = document.querySelector("#app-update");
+const loadedVersion = document.querySelector('meta[name="cue-club-version"]')?.content;
+let nextUpdateCheck = 0;
 const base = "/cue-club/";
 const tabs = ["Home", "Results", "Players", "Table", "Profile"];
 let token = localStorage.getItem("cue-token") || "", uid = localStorage.getItem("cue-uid") || "";
@@ -55,6 +58,23 @@ async function api(path, method = "GET", body = undefined) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw Object.assign(new Error(payload.error || "Server returned " + response.status), {code:response.status});
   return payload;
+}
+async function checkForWebUpdate() {
+  if (!loadedVersion || document.hidden || Date.now() < nextUpdateCheck || updateNotice.childElementCount) return;
+  nextUpdateCheck = Date.now() + 60_000;
+  try {
+    const response = await fetch("/updates/web", {cache:"no-store"});
+    if (!response.ok) return;
+    const {version} = await response.json();
+    if (!version || version === loadedVersion) return;
+    updateNotice.append(
+      el("span", {}, "A Cue Club update is available."),
+      button("Reload", () => {
+        if (writing) { toast("Wait for your change to finish before reloading."); return; }
+        window.location.reload();
+      }, true)
+    );
+  } catch { /* Check again after the connection recovers. */ }
 }
 function acceptSnapshot(snapshot) {
   if (snapshot.serverTimeMs) clockOffset = snapshot.serverTimeMs - Date.now();
@@ -657,13 +677,18 @@ pushRegistration.then(async registration => {
 navigator.serviceWorker?.addEventListener("message", event => {
   if (event.data?.type === "match-notice") { page = "Home"; sync(); }
 });
-document.addEventListener("visibilitychange", () => { if (!document.hidden) sync(); });
-window.addEventListener("online", sync);
+function refreshWhenVisible() {
+  if (document.hidden) return;
+  sync();
+  checkForWebUpdate();
+}
+document.addEventListener("visibilitychange", refreshWhenVisible);
+window.addEventListener("online", refreshWhenVisible);
 systemAppearance.addEventListener("change", () => {
   if (localStorage.getItem("cue-theme") === "system") { applyAppearance(); render(true); }
 });
 applyAppearance();
 render();
-sync();
-setInterval(() => { if (!document.hidden) sync(); }, 4000);
+refreshWhenVisible();
+setInterval(refreshWhenVisible, 4000);
 setInterval(updateClock, 250);

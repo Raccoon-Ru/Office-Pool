@@ -6,6 +6,7 @@ header,nav{position:sticky;z-index:2;background:var(--bg);border-color:var(--lin
 header{top:0;padding-top:env(safe-area-inset-top);border-bottom:1px solid var(--line)}
 nav{position:fixed;inset:auto 0 0;padding-bottom:env(safe-area-inset-bottom);border-top:1px solid var(--line)}
 .shell,main{width:min(100%,56rem);margin:auto}
+#app-update:not(:empty){display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5rem;width:min(100%,56rem);margin:auto;padding:.6rem 1rem;background:var(--panel);border-bottom:1px solid var(--line)}
 .shell{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:.65rem 1rem}
 main{padding:1.15rem 1rem calc(6rem + env(safe-area-inset-bottom))}
 h1,h2,h3,p{margin:0 0 .6rem}h1{font-size:2.2rem;letter-spacing:-.06em;line-height:1.08}h2{font-size:1.28rem;letter-spacing:-.025em}h3{font-size:1.05rem}
