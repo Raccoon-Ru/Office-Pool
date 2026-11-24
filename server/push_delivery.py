@@ -6,6 +6,7 @@ import base64
 import binascii
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 try:
@@ -98,8 +99,13 @@ def deliver(connect_db, db_lock, admin_email, recipients, message):
             destinations = db.execute(
                 f"""SELECT p.endpoint,p.encryption FROM web_push_subscriptions p
                     JOIN sessions s ON s.token_hash=p.session_hash AND s.uid=p.uid
-                    WHERE p.uid IN ({placeholders}) AND datetime(s.created_at)>datetime('now','-60 days')""",
-                tuple(recipients),
+                    WHERE p.uid IN ({placeholders}) AND s.created_at > ?""",
+                (
+                    *recipients,
+                    (datetime.now(timezone.utc) - timedelta(days=60)).isoformat(
+                        timespec="seconds"
+                    ),
+                ),
             ).fetchall()
             if not destinations:
                 return

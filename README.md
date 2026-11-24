@@ -40,6 +40,24 @@ After installing, tap **Enable match alerts** on Home to grant notification perm
 
 On the PC, install notification support with `python -m pip install -r server/requirements-web.txt`. The existing server serves the web app at `/cue-club/` when `web_app_enabled` is set to `true` in the server configuration. The notification signing key and subscriptions are saved in the Cue Club database.
 
+## Render and Supabase deployment
+
+Cue Club supports one Render Python web service backed by Supabase Postgres. The backend creates a private `cue_club` schema and stores profile photos there as binary data, so the app does not depend on a Render disk or a separate public storage bucket. Keep the database connection server-side.
+
+Configure the existing Render service from the repository root.
+
+- Build command `python -m pip install -r server/requirements-render.txt`
+- Start command `python -m server.office_pool_server`
+- Health check path `/health`
+- Environment `DATABASE_URL` from Supabase **Connect > Session pooler**, with your database password filled in, and `OFFICE_POOL_JOIN_CODE` set to the office join code. Optionally configure `OFFICE_POOL_ADMIN_EMAIL` and `OFFICE_POOL_DOMAIN` if they differ from the current office settings.
+- Use an always-on Render service plan if instant availability is required. The Render free plan can sleep while idle.
+
+The server uses Render's `PORT`, enables the iPhone web app at `/cue-club/`, and checks the database on `/health`. PostgreSQL connections verify the TLS certificate against the system or configured CA bundle. To use a Supabase CA file, set `OFFICE_POOL_DB_SSLROOTCERT` to its path on Render.
+
+For an existing PC installation, create a fresh verified ZIP with `server/backup_office_pool.py`. Run `python -m server.migrate_to_supabase <backup.zip>` with `DATABASE_URL` set securely in the migration environment. The command imports existing accounts, sessions, confirmed results, leagues and photos into an empty target. It cancels the import if the target already has Cue Club rows. Schedule the final backup and import during a pause in match activity to avoid recording results in two places. After verification, share the new Render `/cue-club/` link. iPhone users will sign in again and enable alerts on the new web address.
+
+Build the Android APK with `-PcueClubServerUrl=https://YOUR-SERVICE.onrender.com` to make Render the default and update installs using the former default address. Players can also update the server address from **My profile > Settings**.
+
 ## Build the APK
 
 From the `my_app` folder, run:

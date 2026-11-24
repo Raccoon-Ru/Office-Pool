@@ -13,7 +13,6 @@ import sqlite3
 import threading
 import time
 import uuid
-from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,8 +25,9 @@ CONFIG_FILE = Path(
     os.environ.get("OFFICE_POOL_CONFIG", HERE / "server_config.json")
 ).resolve()
 if __package__:
-    from . import push_delivery
+    from . import database, push_delivery
 else:
+    import database
     import push_delivery
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
@@ -43,7 +43,9 @@ WEB_ASSETS = {
     "/cue-club/icon.jpg": ("icon.jpg", "image/jpeg"),
 }
 
-HOST, PORT = "127.0.0.1", 8765
+ON_RENDER = os.environ.get("RENDER", "").lower() == "true"
+HOST = os.environ.get("OFFICE_POOL_HOST", "0.0.0.0" if ON_RENDER else "127.0.0.1")
+PORT = int(os.environ.get("PORT", "8765"))
 MAX_JSON = 1_000_000
 ELO_START = 1200
 ELO_K = 32
@@ -57,7 +59,11 @@ PHOTO_TYPES = {
     "image/webp": ("webp", b"RIFF"),
 }
 PBKDF2_ROUNDS = 310_000
-ADMIN_EMAIL = "ruan.raaths@acumensoft.net"
+ADMIN_EMAIL = (
+    os.environ.get("OFFICE_POOL_ADMIN_EMAIL", "ruan.raaths@acumensoft.net")
+    .strip()
+    .lower()
+)
 DB_LOCK = threading.RLock()
 
 
@@ -66,40 +72,42 @@ def now_iso() -> str:
 
 
 def get_config() -> dict:
-    if not CONFIG_FILE.exists():
-        cfg = {
-            "office_domain": "acumensoft.net",
-            "join_code": secrets.token_urlsafe(8),
-        }
+    join_code = os.environ.get("OFFICE_POOL_JOIN_CODE")
+    if ON_RENDER and (not database.POSTGRES or not join_code):
+        raise RuntimeError("Render requires DATABASE_URL and OFFICE_POOL_JOIN_CODE.")
+    if CONFIG_FILE.is_file():
+        cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    elif join_code:
+        cfg = {}
+    else:
+        cfg = {"office_domain": "acumensoft.net", "join_code": secrets.token_urlsafe(8)}
         CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-        print("Created server_config.json. Share this office join code with coworkers:")
-        print("  " + cfg["join_code"])
-    cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        print("Created server_config.json with a new office join code.")
+    if join_code:
+        cfg["join_code"] = join_code
     cfg["office_domain"] = (
-        str(cfg.get("office_domain", "acumensoft.net")).strip().lower().lstrip("@")
+        os.environ.get(
+            "OFFICE_POOL_DOMAIN", str(cfg.get("office_domain", "acumensoft.net"))
+        )
+        .strip()
+        .lower()
+        .lstrip("@")
     )
     return cfg
 
 
 CONFIG = get_config()
-WEB_APP_ENABLED = CONFIG.get("web_app_enabled", False) is True
-DATA.mkdir(parents=True, exist_ok=True)
-PHOTOS.mkdir(parents=True, exist_ok=True)
+WEB_APP_ENABLED = CONFIG.get("web_app_enabled", ON_RENDER) is True
+if not database.POSTGRES:
+    PHOTOS.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA / "office_pool.sqlite3"
 
 
-@contextmanager
 def connect_db():
-    with closing(sqlite3.connect(DB_PATH, timeout=15)) as db, db:
-        db.row_factory = sqlite3.Row
-        yield db
+    return database.connect(DB_PATH)
 
 
-def init_db() -> None:
-    with DB_LOCK, connect_db() as db:
-        db.execute("PRAGMA journal_mode=WAL")
-        db.executescript(
-            """
+SCHEMA = """
             CREATE TABLE IF NOT EXISTS members (
                 uid TEXT PRIMARY KEY,
                 email TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -190,25 +198,31 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS games_stats_match ON games(stats_match_id) WHERE stats_match_id<>'';
             CREATE INDEX IF NOT EXISTS games_players_status ON games(player_a_uid,player_b_uid,status,created_at DESC);
-            """
-        )
-        columns = {row["name"] for row in db.execute("PRAGMA table_info(members)")}
-        if "is_admin" not in columns:
+"""
+
+
+def init_db(sync_admin: bool = True) -> None:
+    with DB_LOCK, connect_db() as db:
+        if database.POSTGRES:
+            database.initialize_postgres(db, SCHEMA)
+        else:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.executescript(SCHEMA)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(members)")}
+            if "is_admin" not in columns:
+                db.execute(
+                    "ALTER TABLE members ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+                )
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(seasons)")}
+            if "deadline_ms" not in columns:
+                db.execute(
+                    "ALTER TABLE seasons ADD COLUMN deadline_ms INTEGER NOT NULL DEFAULT 0"
+                )
+        if sync_admin:
             db.execute(
-                "ALTER TABLE members ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+                "UPDATE members SET is_admin=CASE WHEN lower(email)=? THEN 1 ELSE 0 END",
+                (ADMIN_EMAIL,),
             )
-        season_columns = {
-            row["name"] for row in db.execute("PRAGMA table_info(seasons)")
-        }
-        if "deadline_ms" not in season_columns:
-            db.execute(
-                "ALTER TABLE seasons ADD COLUMN deadline_ms INTEGER NOT NULL DEFAULT 0"
-            )
-        # The requested allowlist has exactly one administrator. Registration cannot grant roles.
-        db.execute(
-            "UPDATE members SET is_admin=CASE WHEN lower(email)=? THEN 1 ELSE 0 END",
-            (ADMIN_EMAIL,),
-        )
 
 
 def password_hash(password: str, salt: bytes | None = None) -> tuple[str, str]:
@@ -236,6 +250,22 @@ def member_json(
     return member
 
 
+def match_duration(start: str | None, finish: str | None) -> int | None:
+    if not start or not finish:
+        return None
+    try:
+        return max(
+            0,
+            int(
+                (
+                    datetime.fromisoformat(finish) - datetime.fromisoformat(start)
+                ).total_seconds()
+            ),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 def match_json(row: sqlite3.Row, rating_change: int | None) -> dict:
     return {
         "id": row["id"],
@@ -247,7 +277,9 @@ def match_json(row: sqlite3.Row, rating_change: int | None) -> dict:
         "recordedByUid": row["recorded_by_uid"],
         "createdAt": row["created_at"],
         "isLeagueMatch": bool(row["tournament_match_id"]),
-        "durationSeconds": row["duration_seconds"],
+        "durationSeconds": match_duration(
+            row["game_started_at"], row["game_finished_at"]
+        ),
         "ratingChange": rating_change,
     }
 
@@ -362,23 +394,20 @@ class Handler(BaseHTTPRequestHandler):
     def league_snapshot(self, uid: str) -> dict:
         with DB_LOCK, connect_db() as db:
             members = db.execute(
-                "SELECT * FROM members ORDER BY display_name COLLATE NOCASE"
+                "SELECT * FROM members ORDER BY lower(display_name)"
             ).fetchall()
             matches = db.execute(
-                """SELECT m.*, m.rowid AS scorebook_order, g.tournament_match_id,
-                          CASE WHEN g.started_at<>'' AND g.finished_at<>'' THEN
-                              MAX(0, CAST(strftime('%s', g.finished_at) AS INTEGER)
-                                     - CAST(strftime('%s', g.started_at) AS INTEGER))
-                          END AS duration_seconds
-                   FROM matches m LEFT JOIN games g ON g.stats_match_id=m.id AND g.stats_match_id<>''
-                   ORDER BY m.created_at DESC, m.rowid DESC"""
+                f"""SELECT m.*, m.{database.ORDER_COLUMN} AS scorebook_order, g.tournament_match_id,
+                           g.started_at AS game_started_at,g.finished_at AS game_finished_at
+                    FROM matches m LEFT JOIN games g ON g.stats_match_id=m.id AND g.stats_match_id<>''
+                    ORDER BY m.created_at DESC, m.{database.ORDER_COLUMN} DESC"""
             ).fetchall()
             admin = db.execute(
                 "SELECT is_admin FROM members WHERE uid=?", (uid,)
             ).fetchone()
             expire_leagues(db)
             season_row = db.execute(
-                "SELECT * FROM seasons ORDER BY started_at DESC, rowid DESC LIMIT 1"
+                f"SELECT * FROM seasons ORDER BY started_at DESC, {database.ORDER_COLUMN} DESC LIMIT 1"
             ).fetchone()
             season = None
             if season_row:
@@ -468,13 +497,13 @@ class Handler(BaseHTTPRequestHandler):
                     (uid, uid),
                 ).fetchall()
             playing = db.execute(
-                """SELECT g.id,g.player_a_uid,g.player_b_uid,g.started_at,g.tournament_match_id,
+                f"""SELECT g.id,g.player_a_uid,g.player_b_uid,g.started_at,g.tournament_match_id,
                           a.display_name AS player_a_name,b.display_name AS player_b_name
                    FROM games g
                    JOIN members a ON a.uid=g.player_a_uid
                    JOIN members b ON b.uid=g.player_b_uid
                    WHERE g.status='active' AND g.started_at<>''
-                   ORDER BY g.started_at DESC,g.rowid DESC"""
+                   ORDER BY g.started_at DESC,g.{database.ORDER_COLUMN} DESC"""
             ).fetchall()
         games = [
             {
@@ -604,6 +633,13 @@ class Handler(BaseHTTPRequestHandler):
             self.serve_web_asset(path)
             return
         if path == "/health":
+            if database.POSTGRES:
+                try:
+                    with connect_db() as db:
+                        db.execute("SELECT 1").fetchone()
+                except Exception:
+                    self.send_json(503, {"online": False})
+                    return
             self.send_json(200, {"online": True, "serverTime": now_iso()})
             return
         uid, ok = self.require_user()
@@ -632,10 +668,17 @@ class Handler(BaseHTTPRequestHandler):
                 filename = row["photo_file"] if row else ""
                 raw = None
                 if filename and (not revision or revision == filename):
-                    try:
-                        raw = (PHOTOS / filename).read_bytes()
-                    except FileNotFoundError:
-                        pass
+                    if database.POSTGRES:
+                        photo = db.execute(
+                            "SELECT content FROM profile_photos WHERE filename=?",
+                            (filename,),
+                        ).fetchone()
+                        raw = bytes(photo["content"]) if photo else None
+                    else:
+                        try:
+                            raw = (PHOTOS / filename).read_bytes()
+                        except FileNotFoundError:
+                            pass
             if raw is None:
                 self.send_error(404)
                 return
@@ -1158,7 +1201,16 @@ class Handler(BaseHTTPRequestHandler):
                 previous = db.execute(
                     "SELECT photo_file FROM members WHERE uid=?", (uid,)
                 ).fetchone()["photo_file"]
-                if not path.is_file():
+                if database.POSTGRES:
+                    db.execute(
+                        "INSERT INTO profile_photos(filename,content) VALUES(?,?) ON CONFLICT(filename) DO NOTHING",
+                        (filename, raw),
+                    )
+                    if previous and previous != filename:
+                        db.execute(
+                            "DELETE FROM profile_photos WHERE filename=?", (previous,)
+                        )
+                elif not path.is_file():
                     temp = path.with_suffix(path.suffix + ".tmp")
                     try:
                         temp.write_bytes(raw)
@@ -1169,7 +1221,7 @@ class Handler(BaseHTTPRequestHandler):
                     "UPDATE members SET photo_file=?, updated_at=? WHERE uid=?",
                     (filename, now_iso(), uid),
                 )
-            if previous and previous != filename:
+            if not database.POSTGRES and previous and previous != filename:
                 try:
                     (PHOTOS / previous).unlink(missing_ok=True)
                 except OSError as exc:
@@ -1282,8 +1334,8 @@ def confirm_game_result(
     if not a or not b:
         raise ValueError("A player profile could not be found.")
     db.execute(
-        """INSERT OR IGNORE INTO matches(id,player_a_uid,player_a_name,player_b_uid,player_b_name,winner_uid,recorded_by_uid,created_at)
-           VALUES(?,?,?,?,?,?,?,?)""",
+        """INSERT INTO matches(id,player_a_uid,player_a_name,player_b_uid,player_b_name,winner_uid,recorded_by_uid,created_at)
+           VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING""",
         (
             stats_id,
             game["player_a_uid"],
@@ -1328,9 +1380,10 @@ def main() -> None:
     init_db()
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Office Pool server listening on http://{HOST}:{PORT}")
-    print(
-        "The API only listens on this PC. Use Tailscale Funnel for the shared HTTPS address."
-    )
+    if not ON_RENDER:
+        print(
+            "The API listens locally by default. Use Tailscale Funnel for a shared HTTPS address."
+        )
     print(f"Office email domain: @{CONFIG['office_domain']}")
     print(
         "Keep this window open while the PC is hosting the league. Press Ctrl+C to stop."

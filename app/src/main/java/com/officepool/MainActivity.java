@@ -24,7 +24,8 @@ public class MainActivity extends Activity {
     private static final String[] APPEARANCE_MODES = {"System", "Light", "Dark"};
     private int INK, MUTED, BG, CARD, LINE, featuredPanel;
     private boolean darkAppearance;
-    private static final String DEFAULT_SERVER_URL = "https://acumen-ruan2024.tail49ffe5.ts.net";
+    private static final String DEFAULT_SERVER_URL = BuildConfig.CUE_CLUB_SERVER_URL;
+    private static final String FORMER_SERVER_URL = "https://acumen-ruan2024.tail49ffe5.ts.net";
     static final String WORK_DOMAIN = "@acumensoft.net";
     static final String PREFERENCES_NAME = "MainActivity";
     static final int PICK_PHOTO = 4102;
@@ -186,7 +187,10 @@ public class MainActivity extends Activity {
 
     void load() {
         serverUrl = prefs.getString("serverUrl", DEFAULT_SERVER_URL);
-        if (serverUrl.trim().isEmpty()) serverUrl = DEFAULT_SERVER_URL;
+        String configured = serverUrl.trim().replaceAll("/+$", "");
+        if (configured.isEmpty() || configured.equalsIgnoreCase(FORMER_SERVER_URL)) {
+            serverUrl = DEFAULT_SERVER_URL;
+        }
         token = prefs.getString("token", "");
         uid = prefs.getString("uid", "");
         sessionName = prefs.getString("sessionName", "");
