@@ -1,0 +1,31 @@
+# Android build outputs and local SDK settings
+.gradle/
+**/build/
+local.properties
+*.apk
+*.aab
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# PC-local data, configuration and credentials
+/server/data/
+/server/server_config.json
+/server/server_config.json.tmp
+/server/*.log
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.env
+.env.*
+!.env.example
+
+# Local tools and test artifacts
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+.vscode/
+/work/
+/outputs/

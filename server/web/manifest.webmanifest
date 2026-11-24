@@ -1,0 +1,11 @@
+{
+  "id": "/cue-club/",
+  "name": "Cue Club",
+  "short_name": "Cue Club",
+  "start_url": "/cue-club/",
+  "scope": "/cue-club/",
+  "display": "standalone",
+  "background_color": "#25282b",
+  "theme_color": "#25282b",
+  "icons": [{"src": "/cue-club/icon.jpg", "sizes": "1024x1024", "type": "image/jpeg", "purpose": "any"}]
+}
