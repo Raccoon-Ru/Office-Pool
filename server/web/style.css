@@ -33,7 +33,7 @@ label[hidden]{display:none}
 input,select{width:100%;min-height:44px;background:var(--bg);border:1px solid var(--line);border-radius:.65rem;padding:.55rem .65rem}
 .avatar{width:45px;height:45px;border-radius:50%;display:inline-grid;place-items:center;background:var(--tile);color:var(--good);font-weight:800;overflow:hidden;flex:none}
 .avatar img{width:100%;height:100%;object-fit:cover}
-.tree{display:flex;gap:1rem;overflow:auto;padding:.25rem 0 .75rem;scroll-snap-type:x proximity}
+.tree{position:relative;display:flex;gap:1rem;overflow:auto;padding:.25rem 0 .75rem;scroll-snap-type:x proximity}
 .round{flex:0 0 12rem;scroll-snap-align:start}.round h3{background:var(--tile);border-radius:.5rem;text-align:center;padding:.35rem}
 .pair{background:var(--bg);border:1px solid var(--line);border-radius:.8rem;padding:.55rem;margin:.6rem 0;text-align:center}
 .pair.mine{border-color:var(--good)}.pair .row{flex-wrap:nowrap}.person{display:grid;justify-items:center;gap:.3rem;min-width:0;flex:1;font-size:.875rem}.person span:last-child{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.person.winner .avatar{outline:2px solid var(--good)}
@@ -68,10 +68,41 @@ dialog{width:min(92vw,30rem);max-height:80dvh;overflow:auto;color:var(--ink);bac
 .versus-word{font-size:clamp(2rem,9vw,3.8rem);font-weight:900;font-style:italic;color:var(--chart)}
 .match-intro .versus-left{animation:from-left .36s ease-out both}
 .match-intro .versus-right{animation:from-right .36s ease-out both}
-.match-intro .versus-word{animation:versus-pop .24s .13s ease-out both}
-.match-intro>.card{animation:clock-reveal .25s .38s ease-out both}
+.versus-center{position:relative;display:grid;place-items:center}
+.eight-ball{display:grid;place-items:center;width:40px;height:40px;border:1px solid #89958f;border-radius:50%;background:var(--pool-color,#171c19);box-shadow:inset 0 4px 7px #ffffff38,inset 0 -5px 8px #0006}
+.eight-ball .ball-number{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:#fff9e9;color:#151917;font:bold 14px system-ui}
+.eight-ball.striped{background:linear-gradient(#fff9e9 23%,var(--pool-color) 23% 77%,#fff9e9 77%)}
+.break-ball{position:absolute;animation:break-roll 1.02s ease-out both;pointer-events:none}
+.match-intro .versus-word{animation:versus-pop .25s .94s ease-out both}
+.match-intro>.card{animation:clock-reveal .28s 1.12s ease-out both}
+.pocket-result{position:relative;overflow:hidden}
+.pocket-result .result-details{animation:clock-reveal .33s .79s ease-out both}
+.pocket-shot{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;animation:pocket-dismiss .94s both}
+.pocket-shot .eight-ball{z-index:1;animation:sink-ball .84s ease-out both}
+.pocket{width:48px;height:48px;border:3px solid #59685a;border-radius:50%;background:#171b19}
+.bracket-advance{animation:advance-glow .9s .34s ease-out both}
+.final-celebration{animation:advance-glow .9s .79s ease-out both}
+.final-celebration{--motion-glow:#efce80}
+.bracket-trace{position:absolute;z-index:1;pointer-events:none}
+.table-transition{animation:clock-reveal .28s ease-out both}
+.pull-shot{position:fixed;z-index:4;left:50%;top:calc(env(safe-area-inset-top) + 56px);transform:translateY(var(--pull-offset,0px));pointer-events:none}
+.pull-ball{position:absolute;left:-22px;width:44px;height:44px;transition:opacity .22s}
+.pull-cue{position:absolute;right:22px;top:19px;width:88px;height:6px;border-radius:3px;background:linear-gradient(90deg,#5a3826,#bf874d 62%,#f0d9a5 91%,#e8e6df 92%);transform:translateX(var(--cue-draw,0px))}
+.refresh-strike .pull-cue{animation:cue-strike .25s ease-out both}
+.refresh-strike .pull-ball{animation:refresh-roll .285s .105s ease-out both}
+.refresh-settle{opacity:0}
+@keyframes break-roll{0%{opacity:0;transform:translateX(-47px) rotate(-300deg)}12%{opacity:1}69%,83%{opacity:1;transform:translateX(0) rotate(0deg)}100%{opacity:0;transform:translateX(0) scale(.65)}}
+@keyframes sink-ball{0%{transform:translateX(-65px) rotate(-360deg)}74%{opacity:1;transform:translateX(44px) rotate(0deg)}100%{opacity:0;transform:translateX(44px) scale(.2)}}
+@keyframes pocket-dismiss{0%,78%{opacity:1}100%{opacity:0;visibility:hidden}}
+@keyframes advance-glow{0%,100%{box-shadow:none}42%{box-shadow:inset 0 0 0 2px var(--motion-glow,var(--good))}}
+@keyframes cue-strike{42%{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(0)}}
+@keyframes refresh-roll{to{transform:translateX(112px) rotate(360deg)}}
 @keyframes from-left{from{opacity:0;transform:translateX(-24px)}to{opacity:1;transform:none}}
 @keyframes from-right{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}
 @keyframes versus-pop{from{opacity:0;transform:scale(.72)}to{opacity:1;transform:none}}
 @keyframes clock-reveal{from{opacity:0}to{opacity:1}}
-@media(prefers-reduced-motion:reduce){.match-intro *,.match-intro>.card{animation:none!important}}
+@media(prefers-reduced-motion:reduce){
+  .match-intro *,.match-intro>.card,.table-transition,.refresh-strike .pull-ball,.refresh-strike .pull-cue,
+  .pocket-result .result-details,.final-celebration,.bracket-advance{animation:none!important}
+  .break-ball,.pocket-shot,.bracket-trace{display:none}
+}

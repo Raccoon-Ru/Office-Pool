@@ -40,16 +40,28 @@ public class MainActivity extends Activity {
     static final int NOTIFICATION_PERMISSION_REQUEST = 5201;
     LinearLayout root, content, nav;
     ScrollView bodyScroll;
+    private HorizontalScrollView bracketScroll;
     TextView statusChip;
     private TextView matchAlertsStatus;
     private TextView poolTableStatus;
     private JSONArray playingNow = new JSONArray();
     private JSONArray weeklyHighlights = new JSONArray();
+    private final Set<String> newResults = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private final Queue<JSONObject> bracketAdvances = new ConcurrentLinkedQueue<>();
+    private volatile boolean tableMotionPending;
+    private boolean motionSnapshotSeen;
     private final Map<TextView, String> tableClocks = new LinkedHashMap<>();
     private boolean hasTableStatus;
+    private volatile long lastSyncAt;
+    private volatile boolean connectionChecked;
+    private JSONObject nextUp;
+    private boolean hasNextUp;
+    private String notificationGameId = "";
+    private TextView syncLabel;
     private String viewedProfileUid = "";
     private int profileReturnPage = 2;
     int page = 0;
+    private final Deque<Integer> pageHistory = new ArrayDeque<>();
 
     private enum ResultFilter {
         ALL,
@@ -104,6 +116,9 @@ public class MainActivity extends Activity {
         load();
         if (b != null) {
             page = b.getInt("page");
+            notificationGameId = b.getString("notificationGameId", "");
+            ArrayList<Integer> history = b.getIntegerArrayList("pageHistory");
+            if (history != null) pageHistory.addAll(history);
             viewedProfileUid = b.getString("viewedProfileUid", "");
             profileReturnPage = b.getInt("profileReturnPage", 2);
             showAdminPanel = b.getBoolean("showAdminPanel");
@@ -123,6 +138,8 @@ public class MainActivity extends Activity {
     protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
         state.putInt("page", page);
+        state.putString("notificationGameId", notificationGameId);
+        state.putIntegerArrayList("pageHistory", new ArrayList<>(pageHistory));
         state.putString("viewedProfileUid", viewedProfileUid);
         state.putInt("profileReturnPage", profileReturnPage);
         state.putBoolean("showAdminPanel", showAdminPanel);
@@ -172,6 +189,10 @@ public class MainActivity extends Activity {
         if (intent == null || !intent.hasExtra(MatchInboxService.LEAGUE_NOTIFICATION)) return false;
         showAdminPanel = false;
         page = intent.getBooleanExtra(MatchInboxService.LEAGUE_NOTIFICATION, false) ? 0 : 1;
+        String target = intent.getStringExtra(MatchInboxService.MATCH_NOTIFICATION_ID);
+        notificationGameId = target == null ? "" : target;
+        timerGameId = "";
+        intent.removeExtra(MatchInboxService.MATCH_NOTIFICATION_ID);
         intent.removeExtra(MatchInboxService.LEAGUE_NOTIFICATION);
         return true;
     }
@@ -384,10 +405,18 @@ public class MainActivity extends Activity {
         matchAlertsStatus = null;
         poolTableStatus = null;
         tableClocks.clear();
+        bracketScroll = null;
+        syncLabel = null;
         if (token.isEmpty()) {
             timerGameId = "";
             openedMatchTimers.clear();
             showAuth();
+            return;
+        }
+        JSONObject exactGame = notificationGameId.isEmpty() ? null : findGame(notificationGameId);
+        if (exactGame != null && isOwnStartedGame(exactGame)
+                && !exactGame.optString("status").equals("declined")) {
+            openMatchTimer(exactGame);
             return;
         }
         JSONObject timed = findGame(timerGameId);
@@ -400,7 +429,7 @@ public class MainActivity extends Activity {
         timerGameId = "";
         for (int i = 0; i < games.length(); i++) {
             JSONObject game = games.optJSONObject(i);
-            if (isOwnStartedGame(game)
+            if (notificationGameId.isEmpty() && isOwnStartedGame(game)
                     && isTimingMatch(game.optString("status"))
                     && !openedMatchTimers.contains(game.optString("id"))) {
                 openMatchTimer(game);
@@ -410,14 +439,40 @@ public class MainActivity extends Activity {
         root = newRoot();
         setContentView(root);
         addHeader();
-        ScrollView s = new ScrollView(this);
+        boolean canRefresh = notificationGameId.isEmpty() && !showAdminPanel && (page == 0 || page == 1);
+        FrameLayout scrollFrame = new FrameLayout(this);
+        TextView cueBall = canRefresh ? PoolMotion.ball(this) : null;
+        View poolCue = canRefresh ? PoolMotion.cue(this) : null;
+        ScrollView s = canRefresh
+                ? new PoolMotion.PullScroll(this, dp(72), cueBall, poolCue, this::syncNow)
+                : new ScrollView(this);
         s.setFillViewport(true);
         bodyScroll = s;
         content = vertical();
         pad(content, 20, 10, 20, 24);
         s.addView(content);
-        root.addView(s, new LinearLayout.LayoutParams(-1, 0, 1));
-        if (showAdminPanel) adminPage();
+        scrollFrame.addView(s, new FrameLayout.LayoutParams(-1, -1));
+        if (cueBall != null) {
+            cueBall.setVisibility(View.GONE);
+            poolCue.setVisibility(View.GONE);
+            FrameLayout.LayoutParams cuePosition = new FrameLayout.LayoutParams(
+                    dp(92), dp(6), Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            cuePosition.topMargin = dp(19);
+            scrollFrame.addView(poolCue, cuePosition);
+            scrollFrame.addView(cueBall, new FrameLayout.LayoutParams(dp(44), dp(44),
+                    Gravity.TOP | Gravity.CENTER_HORIZONTAL));
+        }
+        root.addView(scrollFrame, new LinearLayout.LayoutParams(-1, 0, 1));
+        if (!notificationGameId.isEmpty()) {
+            title("MATCH ALERT", "Match", null);
+            if (exactGame != null) gameCard(content, exactGame);
+            else content.addView(text(online ? "This match is no longer available." : "Looking for your match…",
+                    14, MUTED, false));
+            addHomeMatchButton(content, "Back", () -> {
+                notificationGameId = "";
+                show();
+            });
+        } else if (showAdminPanel) adminPage();
         else render();
         nav = horizontal();
         nav.setBackgroundColor(CARD);
@@ -442,7 +497,7 @@ public class MainActivity extends Activity {
             pad(item, 0, 8, 0, 7);
             item.setOnClickListener(
                     v -> {
-                        page = n;
+                        navigateToPage(n);
                         viewedProfileUid = "";
                         showAdminPanel = false;
                         show();
@@ -474,7 +529,6 @@ public class MainActivity extends Activity {
         timerGameId = game.optString("id");
         boolean animate =
                 openedMatchTimers.add(timerGameId)
-                        && game.optString("tournamentMatchId").isEmpty()
                         && "active".equals(game.optString("status"));
         showMatchTimer(game, animate);
     }
@@ -502,7 +556,9 @@ public class MainActivity extends Activity {
         matchup.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
         TextView versus = text("VS", 36, tone(0xff3D7134, GREEN), true);
         versus.setGravity(Gravity.CENTER);
-        matchup.addView(versus, lp(72, -2));
+        FrameLayout center = new FrameLayout(this);
+        center.addView(versus, new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER));
+        matchup.addView(center, lp(72, -2));
         matchup.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
         content.addView(matchup, lp(-1, -2));
         LinearLayout clock = card();
@@ -514,26 +570,30 @@ public class MainActivity extends Activity {
         matchTimerText.setGravity(Gravity.CENTER);
         clock.addView(matchTimerText, lp(-1, -2));
         updateMatchTimer();
-        if (animate
-                && (Build.VERSION.SDK_INT < 26
-                        || android.animation.ValueAnimator.areAnimatorsEnabled())) {
-            animateMatchIntro(left, right, versus, clock);
+        if (animate && PoolMotion.enabled(this)) {
+            animateMatchIntro(left, right, center, versus, clock);
         }
 
         String reportField =
                 uid.equals(game.optString("playerAUid")) ? "reportAWinnerUid" : "reportBWinnerUid";
         boolean reported = !game.optString(reportField).isEmpty();
         if (finished) {
-            content.addView(text("Winner · " + game.optString("winnerName"), 18, resultGold(), true));
+            LinearLayout details = vertical();
+            details.addView(text("Winner · " + game.optString("winnerName"), 18, resultGold(), true));
             String resultId = game.optString("statsMatchId");
+            boolean reveal = newResults.remove(resultId) && PoolMotion.enabled(this);
             for (int i = 0; !resultId.isEmpty() && i < matches.length(); i++) {
                 JSONObject match = matches.optJSONObject(i);
                 if (match != null && resultId.equals(match.optString("id"))) {
-                    addResultRating(content, match);
-                    addRematchButton(content, match);
+                    addResultRating(details, match, reveal);
+                    addRematchButton(details, match);
                     break;
                 }
             }
+            if (reveal) animatePocket(content, details, isLeagueFinal(resultId));
+            content.addView(details, lp(-1, -2));
+        } else if ("report".equals(game.optString("pendingAction"))) {
+            content.addView(text("Result saved on this phone · waiting to sync", 14, MUTED, false));
         } else if (state.equals("disputed")) {
             content.addView(text("The league admin is reviewing the result.", 14, MUTED, false));
         } else if (reported) {
@@ -541,6 +601,9 @@ public class MainActivity extends Activity {
                     ? game.optString("playerBName") : game.optString("playerAName");
             content.addView(
                     text("Waiting for " + opponent + " to confirm the winner.", 14, MUTED, false));
+        } else if (state.equals("awaiting_confirmation") && !opponentReport(game).isEmpty()) {
+            content.addView(text(reportedWinnerLabel(game), 14, MUTED, false));
+            addResultConfirmation(content, game, () -> {});
         } else {
             TextView result =
                     button(
@@ -571,7 +634,7 @@ public class MainActivity extends Activity {
         return player;
     }
 
-    private void animateMatchIntro(View left, View right, View versus, View clock) {
+    private void animateMatchIntro(View left, View right, FrameLayout center, View versus, View clock) {
         left.setTranslationX(-dp(32));
         right.setTranslationX(dp(32));
         left.setAlpha(0);
@@ -580,10 +643,19 @@ public class MainActivity extends Activity {
         versus.setScaleX(.75f);
         versus.setScaleY(.75f);
         clock.setAlpha(0);
-        left.animate().translationX(0).alpha(1).setDuration(330).start();
-        right.animate().translationX(0).alpha(1).setDuration(330).start();
-        versus.animate().scaleX(1).scaleY(1).alpha(1).setStartDelay(140).setDuration(250).start();
-        clock.animate().alpha(1).setStartDelay(380).setDuration(230).start();
+        left.animate().translationX(0).alpha(1).setDuration(500).start();
+        right.animate().translationX(0).alpha(1).setDuration(500).start();
+        View ball = PoolMotion.ball(this);
+        center.addView(ball, new FrameLayout.LayoutParams(dp(42), dp(42), Gravity.CENTER));
+        ball.setTranslationX(-dp(47));
+        ball.setRotation(-300);
+        ball.animate().translationX(0).rotation(0).setDuration(700)
+                .withEndAction(() -> ball.animate().alpha(0).scaleX(.65f).scaleY(.65f)
+                        .setStartDelay(150).setDuration(170)
+                        .withEndAction(() -> center.removeView(ball)).start())
+                .start();
+        versus.animate().scaleX(1).scaleY(1).alpha(1).setStartDelay(940).setDuration(250).start();
+        clock.animate().alpha(1).setStartDelay(1120).setDuration(280).start();
     }
 
     private void updateMatchTimer() {
@@ -610,15 +682,50 @@ public class MainActivity extends Activity {
         JSONObject game = findGame(timerGameId);
         page = game != null && game.optString("tournamentMatchId").isEmpty() ? 1 : 0;
         timerGameId = "";
+        notificationGameId = "";
         showAdminPanel = false;
         show();
     }
 
+    private void navigateToPage(int destination) {
+        notificationGameId = "";
+        if (destination == 0) pageHistory.clear();
+        else if (destination != page) pageHistory.push(page);
+        page = destination;
+    }
+
     @Override
     public void onBackPressed() {
-        if (!timerGameId.isEmpty()) leaveMatchTimer();
-        else if (!viewedProfileUid.isEmpty()) closeCoworkerProfile();
-        else super.onBackPressed();
+        if (!timerGameId.isEmpty()) {
+            timerGameId = "";
+            notificationGameId = "";
+            show();
+        } else if (!notificationGameId.isEmpty()) {
+            notificationGameId = "";
+            show();
+        } else if (!viewedProfileUid.isEmpty()) {
+            closeCoworkerProfile();
+        } else if (showAdminPanel) {
+            showAdminPanel = false;
+            show();
+        } else if (token.isEmpty()) {
+            if (createAccount) {
+                createAccount = false;
+                show();
+            } else {
+                super.onBackPressed();
+            }
+        } else if (page != 0) {
+            page = pageHistory.isEmpty() ? 0 : pageHistory.pop();
+            show();
+        } else {
+            new AlertDialog.Builder(this)
+                    .setTitle("Leave Cue Club?")
+                    .setMessage("Are you sure you want to leave the app?")
+                    .setNegativeButton("Stay", null)
+                    .setPositiveButton("Leave", (dialog, which) -> finish())
+                    .show();
+        }
     }
 
     void showAuth() {
@@ -867,7 +974,7 @@ public class MainActivity extends Activity {
 
     private void openMyProfile() {
         viewedProfileUid = "";
-        page = 4;
+        navigateToPage(4);
         showAdminPanel = false;
         timerGameId = "";
         show();
@@ -950,38 +1057,14 @@ public class MainActivity extends Activity {
                 dialog.dismiss();
                 showAccountDeletion();
             });
-            if (isAdmin) {
-                addHomeMatchButton(menu, "Account deletion requests", () -> {
-                    dialog.dismiss();
-                    showAccountDeletionRequests();
-                });
-            }
         }
         dialog.setOnDismissListener(dismissed -> statusChip = null);
         dialog.show();
     }
 
     private void showAccountDeletion() {
-        String session = token;
         String base = serverUrl;
-        io.execute(() -> {
-            try {
-                JSONObject request = new OfficeApi(base).get(ACCOUNT_DELETION_PATH, session);
-                runOnUiThread(() -> {
-                    if (!session.equals(token) || !foreground || isFinishing()) return;
-                    if (request.isNull("requestedAt")) {
-                        confirmAccountDeletion(base, session);
-                    } else {
-                        showDeletionPending();
-                    }
-                });
-            } catch (Exception error) {
-                runOnUiThread(() -> toast(errorText(error)));
-            }
-        });
-    }
-
-    private void confirmAccountDeletion(String base, String session) {
+        String session = token;
         EditText password = new EditText(this);
         password.setHint("Current password");
         password.setSingleLine(true);
@@ -992,10 +1075,10 @@ public class MainActivity extends Activity {
         fields.addView(password, lp(-1, -2));
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("Delete account")
-                .setMessage("Request permanent deletion of your Cue Club account. The office administrator will receive your request.")
+                .setMessage("Your account, profile photo, and match records will be permanently deleted. This cannot be undone.")
                 .setView(fields)
                 .setNegativeButton("Cancel", null)
-                .setPositiveButton("Request deletion", null)
+                .setPositiveButton("Delete account", null)
                 .show();
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
             String value = password.getText().toString();
@@ -1007,13 +1090,23 @@ public class MainActivity extends Activity {
             view.setEnabled(false);
             io.execute(() -> {
                 try {
-                    new OfficeApi(base).post(ACCOUNT_DELETION_PATH, session,
+                    new OfficeApi(base).delete(ACCOUNT_DELETION_PATH, session,
                             new JSONObject().put("password", value));
                     runOnUiThread(() -> {
-                        if (dialog.isShowing()) {
-                            dialog.dismiss();
-                            showDeletionPending();
-                        }
+                        if (!session.equals(token)) return;
+                        dialog.dismiss();
+                        String deletedUid = uid;
+                        File photo = pendingPhoto(deletedUid);
+                        clearAccountSession();
+                        if (photo != null) photo.delete();
+                        avatarFile(deletedUid).delete();
+                        NotificationManager notifications = getSystemService(NotificationManager.class);
+                        if (notifications != null) notifications.cancelAll();
+                        prefs.edit().remove("pendingName").remove("pendingNameValue")
+                                .remove("pendingPhoto").remove("pendingPhotoFile")
+                                .remove("pendingPhotoOwner").remove("pendingPhotoMime")
+                                .remove("avatarRevision:" + deletedUid).apply();
+                        toast("Your account was deleted.");
                     });
                 } catch (Exception error) {
                     runOnUiThread(() -> {
@@ -1024,44 +1117,6 @@ public class MainActivity extends Activity {
                     });
                 }
             });
-        });
-    }
-
-    private void showDeletionPending() {
-        new AlertDialog.Builder(this)
-                .setTitle("Delete account")
-                .setMessage("Your deletion request is pending with the office administrator.")
-                .setPositiveButton("Close", null)
-                .show();
-    }
-
-    private void showAccountDeletionRequests() {
-        String session = token;
-        String base = serverUrl;
-        io.execute(() -> {
-            try {
-                JSONArray requests = new OfficeApi(base)
-                        .get("/admin/account-deletion-requests", session).getJSONArray("requests");
-                StringBuilder summary = new StringBuilder();
-                for (int i = 0; i < requests.length(); i++) {
-                    JSONObject request = requests.getJSONObject(i);
-                    String requestedAt = request.getString("requestedAt");
-                    if (i > 0) summary.append("\n\n");
-                    summary.append(request.getString("name")).append('\n')
-                            .append(request.getString("email")).append('\n')
-                            .append(formatServerDate(requestedAt, requestedAt));
-                }
-                runOnUiThread(() -> {
-                    if (!session.equals(token) || !foreground || isFinishing()) return;
-                    new AlertDialog.Builder(this)
-                            .setTitle("Account deletion requests")
-                            .setMessage(summary.length() == 0 ? "No pending requests." : summary.toString())
-                            .setPositiveButton("Close", null)
-                            .show();
-                });
-            } catch (Exception error) {
-                runOnUiThread(() -> toast(errorText(error)));
-            }
         });
     }
 
@@ -1099,22 +1154,7 @@ public class MainActivity extends Activity {
             }
         }
         String oldToken = token, base = serverUrl;
-        token = uid = sessionName = "";
-        isAdmin = showAdminPanel = false;
-        page = 0;
-        matches = new JSONArray();
-        games = new JSONArray();
-        seasonData = new JSONObject();
-        ratingHistory = new JSONArray();
-        viewedProfileUid = "";
-        playingNow = new JSONArray();
-        weeklyHighlights = new JSONArray();
-        hasTableStatus = false;
-        players.clear();
-        members.clear();
-        stopService(new Intent(this, MatchInboxService.class));
-        save();
-        show();
+        clearAccountSession();
         io.execute(
                 () -> {
                     try {
@@ -1123,6 +1163,35 @@ public class MainActivity extends Activity {
                         // This phone has already signed out.
                     }
                 });
+    }
+
+    private void clearAccountSession() {
+        token = uid = sessionName = "";
+        isAdmin = showAdminPanel = false;
+        page = 0;
+        pageHistory.clear();
+        matches = new JSONArray();
+        games = new JSONArray();
+        seasonData = new JSONObject();
+        ratingHistory = new JSONArray();
+        viewedProfileUid = "";
+        playingNow = new JSONArray();
+        weeklyHighlights = new JSONArray();
+        newResults.clear();
+        bracketAdvances.clear();
+        tableMotionPending = false;
+        motionSnapshotSeen = false;
+        hasTableStatus = false;
+        hasNextUp = false;
+        nextUp = null;
+        notificationGameId = "";
+        lastSyncAt = 0;
+        connectionChecked = false;
+        players.clear();
+        members.clear();
+        stopService(new Intent(this, MatchInboxService.class));
+        save();
+        show();
     }
 
     void render() {
@@ -1186,6 +1255,9 @@ public class MainActivity extends Activity {
                         .toUpperCase(Locale.getDefault());
         title(day, "Your cue, your call.", "A little friendly competition goes a long way.");
         renderPoolTable();
+        renderNextUp();
+        syncLabel = text(connectionText(), 12, MUTED, false);
+        content.addView(syncLabel);
         List<JSONObject> actions = homeActions();
         JSONObject nextAction = actions.isEmpty() ? null : actions.get(0);
         if (nextAction != null) gameCard(content, nextAction);
@@ -1497,7 +1569,11 @@ public class MainActivity extends Activity {
     }
 
     private void sharedResultCard(JSONObject match) {
-        LinearLayout card = card();
+        LinearLayout panel = card();
+        LinearLayout card = vertical();
+        boolean reveal = newResults.remove(match.optString("id")) && PoolMotion.enabled(this);
+        if (reveal) animatePocket(panel, card, isLeagueFinal(match.optString("id")));
+        panel.addView(card, lp(-1, -2));
         LinearLayout meta = horizontal();
         boolean league = match.optBoolean("isLeagueMatch");
         TextView type = text(league ? "LEAGUE" : "1V1", 10, tone(0xff315944, 0xffCBEDD0), true);
@@ -1538,7 +1614,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams footerLayout = lp(-1, -2);
         footerLayout.topMargin = dp(5);
         card.addView(footer, footerLayout);
-        addResultRating(card, match);
+        addResultRating(card, match, reveal);
         addRematchButton(card, match);
     }
 
@@ -1559,12 +1635,69 @@ public class MainActivity extends Activity {
         return player;
     }
 
-    private void addResultRating(LinearLayout destination, JSONObject match) {
+    private void addResultRating(LinearLayout destination, JSONObject match, boolean animate) {
         int change = match.optInt("ratingChange", -1);
         if (change >= 0) {
             destination.addView(
                     text("Elo · winner +" + change + "  /  opponent −" + change, 12, MUTED, false));
         }
+        int after = match.optInt("winnerEloAfter", -1);
+        if (after >= 0) {
+            int before = change >= 0 ? after - change : after;
+            TextView rating = text("Winner Elo · " + (animate ? before : after), 13, INK, true);
+            destination.addView(rating);
+            if (animate && before != after) {
+                android.animation.ValueAnimator count = android.animation.ValueAnimator.ofInt(before, after);
+                count.setStartDelay(790);
+                count.setDuration(420);
+                count.addUpdateListener(value -> rating.setText("Winner Elo · " + value.getAnimatedValue()));
+                count.start();
+            }
+        }
+        for (int i = 0; i < weeklyHighlights.length(); i++) {
+            JSONObject highlight = weeklyHighlights.optJSONObject(i);
+            if (highlight != null && match.optString("id").equals(highlight.optString("matchId"))) {
+                destination.addView(text("Biggest upset this week", 12, resultGold(), true));
+                break;
+            }
+        }
+    }
+
+    private boolean isLeagueFinal(String resultId) {
+        JSONObject tournament = seasonData.optJSONObject("tournament");
+        JSONArray tiles = tournament == null ? null : tournament.optJSONArray("matches");
+        if (tiles == null || resultId.isEmpty()) return false;
+        int finalRound = tournament.optInt("roundCount");
+        for (int i = 0; i < tiles.length(); i++) {
+            JSONObject tile = tiles.optJSONObject(i);
+            if (tile != null && tile.optInt("round") == finalRound
+                    && resultId.equals(tile.optString("statsMatchId"))) return true;
+        }
+        return false;
+    }
+
+    private void animatePocket(LinearLayout parent, View details, boolean leagueFinal) {
+        FrameLayout shot = new FrameLayout(this);
+        View pocket = new View(this);
+        GradientDrawable ring = shape(0xff171B19, 40);
+        ring.setStroke(dp(2), leagueFinal ? resultGold() : tone(0xff688473, 0xff8FB19A));
+        pocket.setBackground(ring);
+        shot.addView(pocket, new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER));
+        View ball = PoolMotion.ball(this);
+        shot.addView(ball, new FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER));
+        parent.addView(shot, lp(-1, dp(56)));
+        ball.setTranslationX(-dp(78));
+        ball.setRotation(-360);
+        details.setAlpha(0);
+        ball.animate().translationX(0).rotation(0).setDuration(620)
+                .withEndAction(() -> ball.animate().scaleX(.2f).scaleY(.2f).alpha(0)
+                        .setDuration(220).withEndAction(() -> parent.removeView(shot)).start())
+                .start();
+        if (leagueFinal) {
+            details.setScaleX(.94f);
+            details.setScaleY(.94f);
+        }
+        details.animate().alpha(1).scaleX(1).scaleY(1).setStartDelay(790).setDuration(330).start();
     }
 
     private void addRematchButton(LinearLayout destination, JSONObject match) {
@@ -1601,6 +1734,11 @@ public class MainActivity extends Activity {
 
     private void renderPoolTable() {
         LinearLayout table = card();
+        if (tableMotionPending && PoolMotion.enabled(this)) {
+            table.setAlpha(.35f);
+            table.animate().alpha(1).setDuration(280).start();
+        }
+        tableMotionPending = false;
         table.addView(lineLabel("POOL TABLE"));
         poolTableStatus = text("", 19, INK, true);
         table.addView(poolTableStatus, lp(-1, -2));
@@ -1632,6 +1770,52 @@ public class MainActivity extends Activity {
             }
         }
         updateMatchTimer();
+    }
+
+    private void renderNextUp() {
+        if (!hasNextUp) return;
+        LinearLayout panel = card();
+        panel.addView(lineLabel("NEXT UP"));
+        if (nextUp == null) {
+            if (online) addHomeMatchButton(panel, "Claim next up", this::claimNextUp);
+            else panel.addView(text("Connect to claim the next slot.", 13, MUTED, false));
+            return;
+        }
+        String aUid = nextUp.optString("playerAUid"), bUid = nextUp.optString("playerBUid");
+        OfficeMember a = memberByUid(aUid), b = memberByUid(bUid);
+        panel.addView(text((a == null ? "Player" : a.name) + " vs "
+                + (b == null ? "Player" : b.name), 16, INK, true));
+        if (online && (isAdmin || uid.equals(aUid) || uid.equals(bUid))) {
+            addHomeMatchButton(panel, "Clear slot", () -> postServer(
+                    "/table/next-up", boolPayload("cancel", true), "Next-up slot cleared."));
+        }
+    }
+
+    private void claimNextUp() {
+        ArrayList<OfficeMember> choices = new ArrayList<>();
+        ArrayList<String> labels = new ArrayList<>();
+        for (OfficeMember member : members) {
+            if (uid.equals(member.uid)) continue;
+            choices.add(member);
+            labels.add(member.name);
+        }
+        if (choices.isEmpty()) {
+            toast("Coworkers appear here after registering.");
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Choose who’s playing next with you")
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                    try {
+                        postServer("/table/next-up",
+                                new JSONObject().put("opponentUid", choices.get(which).uid),
+                                "You're next up.");
+                    } catch (JSONException error) {
+                        toast(errorText(error));
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private void updatePoolTableStatus() {
@@ -1698,13 +1882,12 @@ public class MainActivity extends Activity {
                 boolean needsConfirmation =
                         "awaiting_confirmation".equals(game.optString("status"))
                                 && game.optString(reportKey).isEmpty();
-                addHomeMatchButton(
-                        panel,
-                        needsConfirmation ? "Confirm winner" : "Open match timer",
-                        () -> {
-                            if (needsConfirmation) reportWinnerDialog(game);
-                            else openMatchTimer(game);
-                        });
+                if (needsConfirmation && !opponentReport(game).isEmpty()) {
+                    panel.addView(text(reportedWinnerLabel(game), 13, MUTED, false));
+                    addResultConfirmation(panel, game, () -> {});
+                } else {
+                    addHomeMatchButton(panel, "Open match timer", () -> openMatchTimer(game));
+                }
             }
             return;
         }
@@ -1828,6 +2011,7 @@ public class MainActivity extends Activity {
         }
 
         HorizontalScrollView scroll = new HorizontalScrollView(this);
+        bracketScroll = scroll;
         String myMatchId = tournament.optString("myMatchId");
         scroll.setHorizontalScrollBarEnabled(rounds > 1);
         FrameLayout tree = new FrameLayout(this);
@@ -1841,6 +2025,20 @@ public class MainActivity extends Activity {
         Paint connectorPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         connectorPaint.setColor(tone(0xff8DAC97, 0xff89AB91));
         connectorPaint.setStrokeWidth(dp(2));
+        Paint advancePaint = new Paint(connectorPaint);
+        advancePaint.setColor(tone(0xff447B40, GREEN));
+        advancePaint.setStrokeWidth(dp(3));
+        advancePaint.setStyle(Paint.Style.STROKE);
+        Set<String> advancing = new HashSet<>();
+        Set<String> destinations = new HashSet<>();
+        for (JSONObject source = bracketAdvances.poll(); source != null; source = bracketAdvances.poll()) {
+            int round = source.optInt("round"), slot = source.optInt("slot");
+            if (PoolMotion.enabled(this)) {
+                advancing.add(round + ":" + slot);
+                destinations.add((round + 1) + ":" + slot / 2);
+            }
+        }
+        float[] traceProgress = {0f};
         View connectors =
                 new View(this) {
                     @Override
@@ -1856,11 +2054,32 @@ public class MainActivity extends Activity {
                                         x + gap / 2f, y, x + gap / 2f, nextY, connectorPaint);
                                 canvas.drawLine(
                                         x + gap / 2f, nextY, x + gap, nextY, connectorPaint);
+                                if (advancing.contains(round + ":" + slot)) {
+                                    Path path = new Path();
+                                    path.moveTo(x, y);
+                                    path.lineTo(x + gap / 2f, y);
+                                    path.lineTo(x + gap / 2f, nextY);
+                                    path.lineTo(x + gap, nextY);
+                                    PathMeasure measure = new PathMeasure(path, false);
+                                    Path trace = new Path();
+                                    if (measure.getSegment(0, measure.getLength() * traceProgress[0], trace, true)) {
+                                        canvas.drawPath(trace, advancePaint);
+                                    }
+                                }
                             }
                         }
                     }
                 };
         tree.addView(connectors, new FrameLayout.LayoutParams(width, height));
+        if (!advancing.isEmpty()) {
+            android.animation.ValueAnimator trace = android.animation.ValueAnimator.ofFloat(0f, 1f);
+            trace.setDuration(480);
+            trace.addUpdateListener(value -> {
+                traceProgress[0] = (float) value.getAnimatedValue();
+                connectors.invalidate();
+            });
+            trace.start();
+        }
         for (int round = 1; round <= rounds; round++) {
             FrameLayout.LayoutParams position = new FrameLayout.LayoutParams(column, header);
             position.leftMargin = (round - 1) * (column + gap);
@@ -1899,6 +2118,15 @@ public class MainActivity extends Activity {
                     dp(1),
                     highlighted ? tone(0xff79A65D, 0xffA2CA84) : tone(0xffDAE4D9, 0xff54635A));
             tile.setBackground(background);
+            if (destinations.contains(round + ":" + match.optInt("slot"))) {
+                GradientDrawable glow = shape(tone(0xffEBF5E2, 0xff3B4B3C), 16);
+                glow.setStroke(dp(2), tone(0xff447B40, GREEN));
+                tile.setBackground(glow);
+                tile.setScaleX(.96f);
+                tile.setScaleY(.96f);
+                tile.animate().scaleX(1).scaleY(1).setStartDelay(420).setDuration(320)
+                        .withEndAction(() -> tile.setBackground(background)).start();
+            }
 
             LinearLayout pairing = horizontal();
             pairing.setGravity(Gravity.CENTER);
@@ -2114,7 +2342,9 @@ public class MainActivity extends Activity {
         LinearLayout c = card(parent);
         c.addView(text(a + "  vs  " + b, 14, INK, true));
         String detail;
-        if (state.equals("queued")) detail = "Saved on this phone · invite sends when online";
+        if ("report".equals(g.optString("pendingAction"))) {
+            detail = "Result saved on this phone · waiting to sync";
+        } else if (state.equals("queued")) detail = "Saved on this phone · invite sends when online";
         else if (state.equals("invited")) {
             if (uid.equals(g.optString("playerBUid")))
                 detail = a + " challenged you · accept to start the timer";
@@ -2126,7 +2356,7 @@ public class MainActivity extends Activity {
             String opponent = playerA ? b : a;
             detail =
                     myReport.isEmpty()
-                            ? opponent + " reported a winner · your confirmation is needed"
+                            ? reportedWinnerLabel(g)
                             : "Waiting for " + opponent + " to confirm the result";
         } else if (state.equals("disputed"))
             detail =
@@ -2146,16 +2376,20 @@ public class MainActivity extends Activity {
             String reportKey = uid.equals(g.optString("playerAUid"))
                     ? "reportAWinnerUid" : "reportBWinnerUid";
             boolean needsConfirmation = state.equals("awaiting_confirmation")
-                    && g.optString(reportKey).isEmpty();
-            TextView result = button(needsConfirmation ? "Confirm or dispute result" : "Open match timer");
+                    && g.optString(reportKey).isEmpty() && !opponentReport(g).isEmpty()
+                    && !"report".equals(g.optString("pendingAction"));
+            if (needsConfirmation) {
+                addResultConfirmation(c, g, closeMatchDialog);
+                return;
+            }
+            TextView result = button("Open match timer");
             LinearLayout.LayoutParams rp = lp(-1, -2);
             rp.topMargin = dp(10);
             c.addView(result, rp);
             result.setOnClickListener(
                     v -> {
                         closeMatchDialog.run();
-                        if (needsConfirmation) reportWinnerDialog(g);
-                        else if (isOwnStartedGame(g)) openMatchTimer(g);
+                        if (isOwnStartedGame(g)) openMatchTimer(g);
                     });
         }
         if (state.equals("disputed") && isAdmin) {
@@ -2311,6 +2545,45 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    private String opponentReport(JSONObject game) {
+        return game.optString(uid.equals(game.optString("playerAUid"))
+                ? "reportBWinnerUid" : "reportAWinnerUid");
+    }
+
+    private String reportedWinnerLabel(JSONObject game) {
+        boolean playerA = uid.equals(game.optString("playerAUid"));
+        String opponent = game.optString(playerA ? "playerBName" : "playerAName");
+        String winner = opponentReport(game);
+        String name = game.optString(winner.equals(game.optString("playerAUid"))
+                ? "playerAName" : "playerBName");
+        return opponent + " reported " + name + " as the winner";
+    }
+
+    private void addResultConfirmation(LinearLayout panel, JSONObject game, Runnable close) {
+        String winner = opponentReport(game);
+        String a = game.optString("playerAUid");
+        boolean aReportedWinner = winner.equals(a);
+        String alternative = aReportedWinner ? game.optString("playerBUid") : a;
+        String name = game.optString(aReportedWinner ? "playerBName" : "playerAName");
+        addHomeMatchButton(panel, "Confirm winner", () -> sendWinner(game, winner, close));
+        addHomeMatchButton(panel, "Dispute", () -> new AlertDialog.Builder(this)
+                .setTitle("Dispute result?")
+                .setMessage("Report " + name + " as the winner and send the result for admin review.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Send dispute", (dialog, which) -> sendWinner(game, alternative, close))
+                .show());
+    }
+
+    private void sendWinner(JSONObject game, String winner, Runnable close) {
+        try {
+            close.run();
+            gameAction(game.optString("id"), "report", new JSONObject()
+                    .put("winnerUid", winner).put("expectedOpponentWinnerUid", opponentReport(game)));
+        } catch (JSONException error) {
+            toast(errorText(error));
+        }
+    }
+
     void resolveDisputeDialog(JSONObject game) {
         String a = game.optString("playerAName"), b = game.optString("playerBName");
         new AlertDialog.Builder(this)
@@ -2354,13 +2627,16 @@ public class MainActivity extends Activity {
             try {
                 if (local != null) {
                     local.put("pendingAction", action);
-                    if (action.equals("report"))
+                    if (action.equals("report")) {
                         local.put("pendingWinnerUid", body.optString("winnerUid"));
+                        local.put("pendingExpectedWinnerUid", body.optString("expectedOpponentWinnerUid"));
+                    }
                     if (action.equals("respond"))
                         local.put("pendingAccept", body.optBoolean("accept"));
                     save();
                     show();
-                    toast("Saved offline; this will sync when your PC is back online.");
+                    toast(action.equals("report") ? "Result saved on this phone · waiting to sync"
+                            : "Change saved on this phone · waiting to sync");
                 }
             } catch (Exception e) {
                 toast(errorText(e));
@@ -2374,7 +2650,7 @@ public class MainActivity extends Activity {
                         ? (body.optBoolean("accept")
                                 ? "Game accepted. The timer has started."
                                 : "Challenge declined.")
-                        : "Your result was sent for confirmation.");
+                        : "Result sent.");
     }
 
     JSONObject findGame(String id) {
@@ -2410,6 +2686,7 @@ public class MainActivity extends Activity {
                                 remote.put("pendingAction", queued.optString("pendingAction"));
                                 remote.put(
                                         "pendingWinnerUid", queued.optString("pendingWinnerUid"));
+                                remote.put("pendingExpectedWinnerUid", queued.optString("pendingExpectedWinnerUid"));
                                 remote.put("pendingAccept", queued.optBoolean("pendingAccept"));
                             }
                         }
@@ -3156,11 +3433,22 @@ public class MainActivity extends Activity {
                 + "|"
                 + weeklyHighlights.toString()
                 + "|"
+                + hasNextUp
+                + "|"
+                + nextUp
+                + "|"
                 + isAdmin;
     }
 
     void syncNow() {
-        if (token.isEmpty() || serverUrl.isEmpty() || syncBusy) return;
+        syncNow(null);
+    }
+
+    private void syncNow(Runnable refreshFinished) {
+        if (token.isEmpty() || serverUrl.isEmpty() || syncBusy) {
+            if (refreshFinished != null) refreshFinished.run();
+            return;
+        }
         syncBusy = true;
         String base = serverUrl, auth = token;
         io.execute(
@@ -3192,20 +3480,59 @@ public class MainActivity extends Activity {
                         runOnUiThread(
                                 () -> {
                                     updateStatus();
-                                    if (!was || changed) show();
+                                    if (!was || changed) showAfterRefresh(refreshFinished);
+                                    else if (refreshFinished != null) refreshFinished.run();
                                     if (rejectedChange != null) toast(rejectedChange);
                                 });
                     } catch (Exception e) {
                         online = false;
+                        connectionChecked = true;
                         runOnUiThread(
                                 () -> {
-                                    if (was && poolTableStatus != null) show();
-                                    else updateStatus();
+                                    if (was && poolTableStatus != null) showAfterRefresh(refreshFinished);
+                                    else {
+                                        updateStatus();
+                                        if (refreshFinished != null) refreshFinished.run();
+                                    }
                                 });
                     } finally {
                         syncBusy = false;
                     }
                 });
+    }
+
+    private void showAfterRefresh(Runnable refreshFinished) {
+        if (refreshFinished == null) {
+            showSyncedPage();
+            return;
+        }
+        refreshFinished.run();
+        View refreshedRoot = root;
+        handler.postDelayed(() -> {
+            if (root == refreshedRoot && !isFinishing() && !isDestroyed()) showSyncedPage();
+        }, PoolMotion.enabled(this) ? 600 : 0);
+    }
+
+    private void showSyncedPage() {
+        int previousPage = page;
+        ScrollView oldBody = bodyScroll;
+        int vertical = oldBody != null && oldBody.isAttachedToWindow() ? oldBody.getScrollY() : 0;
+        int horizontal = bracketScroll == null ? 0 : bracketScroll.getScrollX();
+        show();
+        ScrollView refreshedBody = bodyScroll;
+        if (page != previousPage || refreshedBody == oldBody || !timerGameId.isEmpty()) return;
+        HorizontalScrollView refreshedBracket = bracketScroll;
+        refreshedBody.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override
+            public boolean onPreDraw() {
+                refreshedBody.getViewTreeObserver().removeOnPreDrawListener(this);
+                if (bodyScroll == refreshedBody) {
+                    refreshedBody.scrollTo(0, vertical);
+                    if (refreshedBracket != null) refreshedBracket.scrollTo(horizontal, 0);
+                }
+                return true;
+            }
+        });
     }
 
     private String flushGameQueue(OfficeApi api, String auth) throws Exception {
@@ -3232,6 +3559,8 @@ public class MainActivity extends Activity {
                                             .put("accept", game.optBoolean("pendingAccept"))
                                     : new JSONObject()
                                             .put("winnerUid", game.optString("pendingWinnerUid"));
+                    String expected = game.optString("pendingExpectedWinnerUid");
+                    if (!expected.isEmpty()) body.put("expectedOpponentWinnerUid", expected);
                     api.post("/games/" + id + "/" + action, auth, body);
                 }
             } catch (OfficeApi.ApiException e) {
@@ -3243,6 +3572,10 @@ public class MainActivity extends Activity {
     }
 
     void mergeSnapshot(JSONObject snap) throws Exception {
+        lastSyncAt = System.currentTimeMillis();
+        connectionChecked = true;
+        hasNextUp = snap.has("nextUp");
+        nextUp = snap.optJSONObject("nextUp");
         long serverTimeMs = snap.optLong("serverTimeMs");
         if (serverTimeMs > 0) {
             serverClockOffsetMs = serverTimeMs - SystemClock.elapsedRealtime();
@@ -3250,6 +3583,9 @@ public class MainActivity extends Activity {
         }
         isAdmin = snap.optBoolean("isAdmin", isAdmin);
         JSONArray playing = snap.optJSONArray("playingNow");
+        if (motionSnapshotSeen) {
+            tableMotionPending |= playing != null && !playing.toString().equals(playingNow.toString());
+        }
         hasTableStatus = playing != null;
         playingNow = playing == null ? new JSONArray() : playing;
         JSONArray highlights = snap.optJSONArray("weeklyHighlights");
@@ -3259,6 +3595,7 @@ public class MainActivity extends Activity {
         JSONArray remoteGames = snap.optJSONArray("games");
         if (remoteGames != null) games = remoteGames;
         JSONObject remoteSeason = snap.optJSONObject("season");
+        if (motionSnapshotSeen) trackBracketAdvances(seasonData, remoteSeason);
         seasonData = remoteSeason == null ? new JSONObject() : remoteSeason;
         JSONArray remoteMembers = snap.optJSONArray("members"),
                 remoteMatches = snap.optJSONArray("matches");
@@ -3268,12 +3605,50 @@ public class MainActivity extends Activity {
                 next.add(OfficeMember.fromJson(remoteMembers.getJSONObject(i)));
         members = next;
         JSONArray combined = new JSONArray();
+        Set<String> knownResults = new HashSet<>();
+        if (motionSnapshotSeen) {
+            for (int i = 0; i < matches.length(); i++) {
+                JSONObject known = matches.optJSONObject(i);
+                if (known != null) knownResults.add(known.optString("id"));
+            }
+        }
         if (remoteMatches != null) {
             for (int i = 0; i < remoteMatches.length(); i++) {
-                combined.put(toLocalMatch(remoteMatches.getJSONObject(i)));
+                JSONObject match = toLocalMatch(remoteMatches.getJSONObject(i));
+                if (motionSnapshotSeen && !knownResults.contains(match.optString("id"))) {
+                    newResults.add(match.optString("id"));
+                }
+                combined.put(match);
             }
         }
         matches = combined;
+        motionSnapshotSeen = true;
+    }
+
+    private void trackBracketAdvances(JSONObject previous, JSONObject incoming) {
+        JSONObject oldCup = previous.optJSONObject("tournament");
+        JSONObject newCup = incoming == null ? null : incoming.optJSONObject("tournament");
+        if (oldCup == null || newCup == null || !oldCup.optString("id").equals(newCup.optString("id"))) {
+            bracketAdvances.clear();
+            return;
+        }
+        JSONArray oldTiles = oldCup.optJSONArray("matches"), newTiles = newCup.optJSONArray("matches");
+        if (oldTiles == null || newTiles == null) return;
+        Set<String> completed = new HashSet<>();
+        for (int i = 0; i < oldTiles.length(); i++) {
+            JSONObject tile = oldTiles.optJSONObject(i);
+            if (tile != null && "completed".equals(tile.optString("status"))) {
+                completed.add(tile.optString("id"));
+            }
+        }
+        for (int i = 0; i < newTiles.length(); i++) {
+            JSONObject tile = newTiles.optJSONObject(i);
+            if (tile != null && "completed".equals(tile.optString("status"))
+                    && !completed.contains(tile.optString("id"))
+                    && tile.optInt("round") < newCup.optInt("roundCount")) {
+                bracketAdvances.add(tile);
+            }
+        }
     }
 
     JSONObject toLocalMatch(JSONObject j) throws Exception {
@@ -3299,17 +3674,27 @@ public class MainActivity extends Activity {
         if (seconds >= 0) m.put("durationSeconds", seconds);
         int change = j.optInt("ratingChange", -1);
         if (change >= 0) m.put("ratingChange", change);
+        int winnerElo = j.optInt("winnerEloAfter", -1);
+        if (winnerElo >= 0) m.put("winnerEloAfter", winnerElo);
         return m;
     }
 
     void updateStatus() {
         updatePoolTableStatus();
+        if (syncLabel != null) syncLabel.setText(connectionText());
         if (statusChip == null) return;
-        statusChip.setText(online ? "● ONLINE" : "● OFFLINE");
+        statusChip.setText(online ? "● ONLINE" : connectionText());
         statusChip.setTextColor(
                 online ? tone(0xff3D7134, 0xffC1EAAE) : tone(0xff8B4639, 0xffFFD0C6));
         statusChip.setBackground(
                 shape(online ? tone(0xffEAF4DF, 0xff37483C) : tone(0xffF8E9E5, 0xff503D3C), 14));
+    }
+
+    private String connectionText() {
+        if (lastSyncAt == 0) return online ? "Connected" : connectionChecked ? "Offline · waiting to reconnect" : "Connecting…";
+        String time = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT)
+                .format(new Date(lastSyncAt));
+        return (online ? "Last synced at " : "Offline · last synced at ") + time;
     }
 
     @Override

@@ -28,6 +28,10 @@ final class OfficeApi {
         return requestJson("POST", path, token, body);
     }
 
+    JSONObject delete(String path, String token, JSONObject body) throws Exception {
+        return requestJson("DELETE", path, token, body);
+    }
+
     JSONObject put(String path, String token, JSONObject body) throws Exception {
         return requestJson("PUT", path, token, body);
     }

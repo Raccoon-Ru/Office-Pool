@@ -14,12 +14,17 @@ let data = null, online = false, page = "Home", filter = "All", signingUp = fals
 let syncBusy = false, writing = false, clockOffset = 0, timerId = "", lastKey = "";
 let messageTimer, notificationState = "", snapshotRevision = 0, settingsConnection;
 let viewedProfile = "", profileReturn = "Players", introPendingId = "";
+let notificationGameId = new URL(location.href).searchParams.get("match") || "";
+let lastSyncAt = 0;
 const seenTimers = new Set(), photoUrls = new Map();
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const motion = {results:new Set(), bracket:[], table:false};
 const self = () => data?.members.find(member => member.uid === uid);
 const own = game => game && [game.playerAUid, game.playerBUid].includes(uid);
 const league = game => !!game?.tournamentMatchId;
 const activeStates = ["active", "awaiting_confirmation", "disputed"];
 const myReport = game => game.playerAUid === uid ? game.reportAWinnerUid : game.reportBWinnerUid;
+const opponentReport = game => game.playerAUid === uid ? game.reportBWinnerUid : game.reportAWinnerUid;
 const byGame = id => data?.games.find(game => game.id === id);
 const byMember = id => data?.members.find(member => member.uid === id);
 const formatTime = seconds => [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60]
@@ -85,12 +90,27 @@ async function checkForWebUpdate() {
 }
 function acceptSnapshot(snapshot) {
   if (snapshot.serverTimeMs) clockOffset = snapshot.serverTimeMs - Date.now();
-  const key = JSON.stringify([snapshot.members, snapshot.games, snapshot.season, snapshot.matches, snapshot.isAdmin, snapshot.ratingHistory, snapshot.playingNow, snapshot.weeklyHighlights]);
+  const key = JSON.stringify([snapshot.members, snapshot.games, snapshot.season, snapshot.matches, snapshot.isAdmin, snapshot.ratingHistory, snapshot.playingNow, snapshot.weeklyHighlights, snapshot.nextUp]);
   const changed = key !== lastKey || !online;
+  if (data && changed) {
+    const known = new Set(data.matches.map(match => match.id));
+    snapshot.matches.forEach(match => { if (!known.has(match.id)) motion.results.add(match.id); });
+    const oldBracket = data.season?.tournament, nextBracket = snapshot.season?.tournament;
+    if (oldBracket?.id && oldBracket.id === nextBracket?.id) {
+      const previous = new Set(oldBracket.matches.filter(match => match.status === "completed").map(match => match.id));
+      nextBracket.matches.filter(match => match.status === "completed" && !previous.has(match.id)).forEach(match => {
+        const next = nextBracket.matches.find(tile => tile.round === match.round + 1 && tile.slot === Math.floor(match.slot / 2));
+        if (next) motion.bracket.push([match.id, next.id]);
+      });
+    }
+    motion.table ||= JSON.stringify(data.playingNow?.map(game => game.id)) !==
+      JSON.stringify(snapshot.playingNow?.map(game => game.id));
+  }
   data = snapshot;
   online = true;
+  lastSyncAt = Date.now();
   lastKey = key;
-  if (!timerId) {
+  if (!timerId && !notificationGameId) {
     const game = data.games.find(game => own(game) && game.startedAt &&
       activeStates.includes(game.status) && !seenTimers.has(game.id));
     if (game) {
@@ -103,6 +123,7 @@ function acceptSnapshot(snapshot) {
     render(true);
     if (navigator.standalone || matchMedia("(display-mode: standalone)").matches) loadPushKey();
   }
+  updateConnectionLabel();
 }
 async function sync() {
   if (!token || syncBusy || writing) return;
@@ -132,7 +153,7 @@ async function change(path, body, success, method = "POST") {
     if (success) toast(success);
     return true;
   } catch (error) {
-    toast(error.message || "Could not reach the server.");
+    toast(error.code ? error.message : "Couldn’t verify your change. Reconnect and check before trying again.");
     return false;
   } finally { writing = false; }
 }
@@ -140,6 +161,8 @@ function clearSession() {
   token = uid = timerId = lastKey = viewedProfile = introPendingId = "";
   data = null;
   notificationState = "";
+  lastSyncAt = 0;
+  notificationGameId = "";
   snapshotRevision++;
   online = false;
   page = "Home";
@@ -149,6 +172,9 @@ function clearSession() {
   for (const url of photoUrls.values()) url.then(value => value && URL.revokeObjectURL(value));
   photoUrls.clear();
   seenTimers.clear();
+  motion.results.clear();
+  motion.bracket = [];
+  motion.table = false;
   render();
 }
 function prompt(title, ...content) {
@@ -242,13 +268,23 @@ function challenge() {
   const dialog = prompt("Challenge a player to 1v1", el("label", {}, "Opponent", select),
     button("Continue", () => { dialog.close(); invite(byMember(select.value)); }, true));
 }
+function claimNextUp() {
+  const people = data.members.filter(member => member.uid !== uid);
+  if (!people.length) { toast("Coworkers appear here after registering."); return; }
+  const select = el("select", {}, people.map(member => el("option", {value:member.uid}, member.displayName)));
+  const dialog = prompt("Claim next up", el("label", {}, "Partner", select),
+    button("Claim slot", async () => {
+      if (await change("/table/next-up", {opponentUid:select.value}, "You're next up.")) dialog.close();
+    }, true));
+}
 function gameStatus(game) {
   if (!game) return "Ready to play";
   if (game.status === "invited") return game.playerBUid === uid ? "Invitation received" : "Waiting for acceptance";
   if (game.status === "active") return "Match in progress";
   if (game.status === "awaiting_confirmation") {
     const opponent = game.playerAUid === uid ? game.playerBName : game.playerAName;
-    return myReport(game) ? "Waiting for " + opponent + " to confirm the result" : opponent + " reported a winner · your confirmation is needed";
+    const winner = opponentReport(game) === game.playerAUid ? game.playerAName : game.playerBName;
+    return myReport(game) ? "Waiting for " + opponent + " to confirm the result" : opponent + " reported " + winner + " as the winner";
   }
   if (game.status === "disputed") return "Waiting for admin review";
   if (game.status === "confirmed") return "Winner · " + game.winnerName;
@@ -264,7 +300,7 @@ function report(game, resolve = false) {
   dialog.insertBefore(actions, dialog.lastChild);
 }
 function markTimerSeen(game) {
-  if (!seenTimers.has(game.id) && !league(game) && game.status === "active") introPendingId = game.id;
+  if (!seenTimers.has(game.id) && game.status === "active") introPendingId = game.id;
   seenTimers.add(game.id);
 }
 function openTimer(game) {
@@ -281,12 +317,21 @@ function gameActions(game) {
     }, true), button("Decline", () => change("/games/" + game.id + "/respond", {accept:false}, "Invitation declined.")));
   }
   if (own(game) && activeStates.includes(game.status) && game.startedAt) {
-    if (game.id !== timerId) {
-      const confirm = game.status === "awaiting_confirmation" && !myReport(game);
-      buttons.push(button(confirm ? "Confirm winner" : "Open match timer",
-        () => confirm ? report(game) : openTimer(game), true));
-    } else if (game.status !== "disputed" && !myReport(game)) {
-      buttons.push(button(game.status === "active" ? "Report winner" : "Confirm winner", () => report(game), true));
+    if (game.status === "awaiting_confirmation" && !myReport(game) && opponentReport(game)) {
+      const reported = opponentReport(game);
+      const alternative = reported === game.playerAUid ? game.playerBUid : game.playerAUid;
+      const name = alternative === game.playerAUid ? game.playerAName : game.playerBName;
+      const send = winnerUid => change("/games/" + game.id + "/report",
+        {winnerUid, expectedOpponentWinnerUid:reported}, "Result sent.");
+      buttons.push(button("Confirm winner", () => send(reported), true), button("Dispute", () => {
+        const dialog = prompt("Dispute result?",
+          muted("Report " + name + " as the winner and send the result for admin review."),
+          button("Send dispute", async () => { if (await send(alternative)) dialog.close(); }, true));
+      }));
+    } else if (game.id !== timerId && game.id !== notificationGameId) {
+      buttons.push(button("Open match timer", () => openTimer(game), true));
+    } else if (game.status === "active" && !myReport(game)) {
+      buttons.push(button("Report winner", () => report(game), true));
     }
   }
   if (data.isAdmin && game.status === "disputed") buttons.push(button("Resolve result", () => report(game, true), true));
@@ -308,11 +353,14 @@ function timerScreen(game) {
   app.append(el("h1", {}, complete ? "Match complete" : league(game) ? "League match" : "1v1 match"));
   if (result) app.append(resultCard(result));
   else app.append(el("div", {class:intro ? "match-intro" : "matchup"},
-      el("div", {class:"versus-line"}, player("A","versus-left"), el("strong", {class:"versus-word"}, "VS"), player("B","versus-right")),
+      el("div", {class:"versus-line"}, player("A","versus-left"),
+        el("div", {class:"versus-center"}, intro && poolBall("break-ball"),
+          el("strong", {class:"versus-word"}, "VS")), player("B","versus-right")),
       card(el("div", {class:"kicker"}, complete ? "MATCH DURATION" : "ELAPSED TIME"),
         el("div", {class:"clock", id:"clock"}, "00:00:00"), muted(gameStatus(game)), gameActions(game))));
   app.append(button("Back to " + (league(game) ? "bracket" : "results"), () => {
       page = league(game) ? "Home" : "Results";
+      notificationGameId = "";
       timerId = "";
       render();
     }));
@@ -372,13 +420,61 @@ function bracket(season) {
       tile?.scrollIntoView({block:"center", inline:"center"});
     }),
     el("div", {class:"tree", tabindex:"0", "aria-label":"Tournament bracket"}, rounds)));
+  const advances = motion.bracket.splice(0);
+  if (!reducedMotion.matches && advances.length) {
+    const tree = app.querySelector(".tree");
+    requestAnimationFrame(() => { if (tree.isConnected) drawBracketAdvances(tree, advances); });
+  }
+}
+function drawBracketAdvances(tree, advances) {
+  const bounds = tree.getBoundingClientRect();
+  for (const [sourceId, targetId] of advances) {
+    const source = document.getElementById("league-" + sourceId);
+    const target = document.getElementById("league-" + targetId);
+    if (!source || !target) continue;
+    const from = source.getBoundingClientRect(), to = target.getBoundingClientRect();
+    const left = from.right - bounds.left + tree.scrollLeft;
+    const right = to.left - bounds.left + tree.scrollLeft;
+    const fromY = from.top + from.height / 2 - bounds.top + tree.scrollTop;
+    const toY = to.top + to.height / 2 - bounds.top + tree.scrollTop;
+    const top = Math.min(fromY, toY);
+    const canvas = el("canvas", {class:"bracket-trace", width:Math.ceil(right-left)+2,
+      height:Math.ceil(Math.abs(fromY-toY))+4, "aria-hidden":"true"});
+    canvas.style.left = left + "px";
+    canvas.style.top = (top - 2) + "px";
+    const ctx = canvas.getContext("2d");
+    if (!ctx) continue;
+    tree.append(canvas);
+    target.classList.add("bracket-advance");
+    ctx.strokeStyle = getComputedStyle(tree).getPropertyValue("--good");
+    ctx.lineWidth = 2;
+    const width = right - left, start = fromY - top + 2, finish = toY - top + 2;
+    const length = width + Math.abs(finish - start);
+    const began = performance.now();
+    function trace(now) {
+      if (!canvas.isConnected) return;
+      const distance = Math.min(1,Math.max(0,(now-began)/480)) * length;
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.beginPath();
+      ctx.moveTo(0,start);
+      ctx.lineTo(Math.min(distance,width/2),start);
+      if (distance > width/2) {
+        ctx.lineTo(width/2,start + Math.sign(finish-start) * Math.min(distance-width/2,Math.abs(finish-start)));
+      }
+      if (distance > length-width/2) ctx.lineTo(width/2 + distance-(length-width/2),finish);
+      ctx.stroke();
+      if (distance < length) requestAnimationFrame(trace);
+      else setTimeout(() => canvas.remove(), 900);
+    }
+    requestAnimationFrame(trace);
+  }
 }
 function poolTable() {
   const known = online && Array.isArray(data.playingNow);
   const games = known ? data.playingNow : [];
   const label = !known ? "Availability unknown" : games.length ? "In use · Playing now" : "Available";
   const status = el("span", {class:"pill" + (!known || games.length ? " offline" : "")}, label);
-  return card(el("div", {class:"row between"}, el("h2", {}, "Pool table"), status),
+  const panel = card(el("div", {class:"row between"}, el("h2", {}, "Pool table"), status),
     games.map(game => {
       const player = side => {
         const name = game["player" + side + "Name"];
@@ -388,9 +484,22 @@ function poolTable() {
       return el("div", {class:"table-game"}, player("A"), el("small", {}, "VS"), player("B"),
         game.startedAt && el("strong", {class:"table-clock", "data-table-started-at":game.startedAt}));
     }));
+  if (motion.table) panel.classList.add("table-transition");
+  motion.table = false;
+  return panel;
 }
 function home() {
   app.append(el("h1", {}, "Your cue, your call."), poolTable());
+  if (data.nextUp !== undefined) {
+    const slot = data.nextUp;
+    const a = byMember(slot?.playerAUid), b = byMember(slot?.playerBUid);
+    app.append(card(el("h2", {}, "Next up"), slot
+      ? el("div", {class:"row between"}, el("strong", {}, (a?.displayName || "Player") + " vs " + (b?.displayName || "Player")),
+        online && (data.isAdmin || own(slot)) && button("Clear slot", () =>
+          change("/table/next-up", {cancel:true}, "Next-up slot cleared.")))
+      : online ? button("Claim next up", claimNextUp) : muted("Connect to claim the next slot.")));
+  }
+  app.append(el("p", {class:"muted", "data-sync-label":true}, connectionText()));
   const needsAction = data.games.filter(game => own(game) && (
     game.status === "awaiting_confirmation" && !myReport(game) ||
     game.status === "invited" && game.playerBUid === uid));
@@ -433,13 +542,41 @@ function resultCard(match) {
     return el("div", {class:"versus-player"}, profilePhoto(byMember(id), name),
       el("strong", {class:id === match.winnerUid ? "champion" : null}, name));
   };
-  return card(el("div", {class:"row between"}, el("span", {class:"pill"}, match.isLeagueMatch ? "League" : "1v1"),
+  const animate = motion.results.delete(match.id) && !reducedMotion.matches;
+  const champion = match.isLeagueMatch && data.season?.tournament?.matches.some(tile =>
+    tile.round === data.season.tournament.roundCount && tile.statsMatchId === match.id);
+  const upset = data.weeklyHighlights?.some(highlight => highlight.matchId === match.id);
+  const rating = el("strong", {}, match.winnerEloAfter);
+  const details = el("div", {class:"result-details"},
+    el("div", {class:"row between"}, el("span", {class:"pill"}, match.isLeagueMatch ? "League" : "1v1"),
     el("small", {}, date(match.createdAt))),
     el("div", {class:"versus-line result-pair"}, player("A"), el("small", {}, "VS"), player("B")),
     el("div", {class:"row between"}, el("strong", {}, "Winner · " + winner),
       match.durationSeconds != null ? el("span", {class:"table-clock"}, formatTime(match.durationSeconds)) : null),
     match.ratingChange != null ? muted("Elo · winner +" + match.ratingChange + " / opponent −" + match.ratingChange) : null,
+    match.winnerEloAfter != null && el("p", {class:"winner-elo"}, "Winner Elo · ", rating),
+    upset && el("p", {class:"champion upset-badge"}, "Biggest upset this week"),
     !match.isLeagueMatch && opponent && button("Rematch", () => invite(opponent)));
+  const panel = card(details);
+  if (animate) {
+    panel.classList.add("pocket-result");
+    if (champion) panel.classList.add("final-celebration");
+    panel.prepend(el("div", {class:"pocket-shot", "aria-hidden":"true"},
+      poolBall(), el("span", {class:"pocket"})));
+    if (match.winnerEloAfter != null && match.ratingChange != null) {
+      const after = match.winnerEloAfter, before = after - match.ratingChange;
+      rating.textContent = before;
+      const start = performance.now() + 790;
+      function count(now) {
+        if (!rating.isConnected) return;
+        const progress = Math.min(1,Math.max(0,(now-start)/420));
+        rating.textContent = Math.round(before + (after-before)*progress);
+        if (progress < 1) requestAnimationFrame(count);
+      }
+      requestAnimationFrame(count);
+    }
+  }
+  return panel;
 }
 function results() {
   app.append(el("h1", {}, "Results"), muted(online ? "Confirmed matches from across the office." : "Showing results from your last sync."));
@@ -604,9 +741,16 @@ function applyAppearance() {
   document.documentElement.dataset.theme = choice === "system" ? (systemAppearance.matches ? "dark" : "light") : choice;
 }
 function updateConnectionLabel() {
-  if (!settingsConnection?.isConnected) return;
-  settingsConnection.textContent = online ? "Server online" : "Server offline";
-  settingsConnection.className = online ? "pill" : "pill offline";
+  if (settingsConnection?.isConnected) {
+    settingsConnection.textContent = online ? "Server online" : connectionText();
+    settingsConnection.className = online ? "pill" : "pill offline";
+  }
+  for (const label of app.querySelectorAll("[data-sync-label]")) label.textContent = connectionText();
+}
+function connectionText() {
+  if (!lastSyncAt) return online ? "Connected" : "Connecting…";
+  const time = new Date(lastSyncAt).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
+  return (online ? "Last synced at " : "Offline · last synced at ") + time;
 }
 async function checkConnection() {
   if (token) { await sync(); return; }
@@ -621,44 +765,28 @@ function accountDeletion() {
   const [passwordField, password] = field("Current password", {
     type:"password", autocomplete:"current-password", required:true
   });
-  const message = el("p", {role:"status"}, "Checking request status…");
-  const submit = button("Request deletion", async () => {
+  const message = el("p", {role:"status"},
+    "Your account, profile photo, and match records will be permanently deleted. This cannot be undone.");
+  const submit = button("Delete account", async () => {
     if (!password.reportValidity()) return;
     submit.disabled = true;
     try {
-      await api(accountDeletionPath, "POST", {password:password.value});
-      showPending();
+      await api(accountDeletionPath, "DELETE", {password:password.value});
+      dialog.close();
+      clearSession();
+      toast("Your account was deleted.");
+      pushRegistration?.then(async registration => {
+        const subscription = await registration?.pushManager?.getSubscription();
+        await subscription?.unsubscribe();
+      }).catch(() => {});
     } catch (error) {
       message.textContent = error.message;
       submit.disabled = false;
     } finally {
       password.value = "";
     }
-  }, false, {disabled:true});
-  passwordField.hidden = true;
-  submit.hidden = true;
-  function showPending() {
-    message.textContent = "Your deletion request is pending with the office administrator.";
-    passwordField.hidden = true;
-    submit.hidden = true;
-  }
-  prompt("Delete account", message, passwordField, submit);
-  api(accountDeletionPath).then(({requestedAt}) => {
-    if (requestedAt) { showPending(); return; }
-    message.textContent = "Request permanent deletion of your Cue Club account. The office administrator will receive your request.";
-    passwordField.hidden = false;
-    submit.hidden = false;
-    submit.disabled = false;
-  }).catch(error => { message.textContent = error.message; });
-}
-function accountDeletionRequests() {
-  const list = el("div", {role:"status"}, muted("Loading requests…"));
-  prompt("Account deletion requests", list);
-  api("/admin/account-deletion-requests").then(({requests}) => {
-    list.replaceChildren(...(requests.length ? requests.map(request =>
-      el("p", {}, el("strong", {}, request.name), el("br"), request.email, el("br"),
-        date(request.requestedAt))) : [muted("No pending requests.")]));
-  }).catch(error => { list.textContent = error.message; });
+  });
+  const dialog = prompt("Delete account", message, passwordField, submit);
 }
 function settings() {
   settingsConnection = el("p", {class:online ? "pill" : "pill offline"}, online ? "Server online" : "Server offline");
@@ -674,10 +802,6 @@ function settings() {
       token && button("My profile", () => { dialog.close(); viewedProfile = ""; page = "Profile"; timerId = ""; render(); }, true),
       button("Check connection", checkConnection),
       token && button("Delete account", () => { dialog.close(); accountDeletion(); }),
-      token && data?.isAdmin && button("Account deletion requests", () => {
-        dialog.close();
-        accountDeletionRequests();
-      }),
       token && button("Sign out", () => {
         dialog.close();
         const confirm = prompt("Sign out?", muted("You can sign in again with your office account."),
@@ -690,6 +814,11 @@ function render(preserve = false) {
   const y = preserve ? scrollY : 0;
   const horizontal = preserve ? document.querySelector(".tree")?.scrollLeft : 0;
   const me = self();
+  const notified = notificationGameId && byGame(notificationGameId);
+  if (notified?.startedAt && own(notified) && notified.status !== "declined") {
+    timerId = notified.id;
+    markTimerSeen(notified);
+  }
   header.replaceChildren(el("div", {class:"shell"},
     el("span", {class:"brand"}, el("img", {src:base+"icon.jpg", alt:""}), "CUE CLUB"),
     el("div", {class:"row header-controls"},
@@ -700,10 +829,24 @@ function render(preserve = false) {
   if (shortcut) shortcut.replaceChildren(el("span", {class:"shortcut-name"}, me.displayName), avatar(me));
   updateConnectionLabel();
   nav.replaceChildren(token && data && !timerId ? el("div",{class:"shell"},tabs.map(tab =>
-    button(tab, () => { page = tab; viewedProfile = ""; render(); }, false, {"aria-current":tab === page ? "page" : null}))) : "");
+    button(tab, () => { page = tab; viewedProfile = ""; notificationGameId = ""; render(); }, false, {"aria-current":tab === page ? "page" : null}))) : "");
   app.replaceChildren();
   if (!token) signInScreen();
   else if (!data) app.append(el("h1", {}, "Cue Club"), muted("Connecting to the server…"), button("Retry", sync));
+  else if (notificationGameId) {
+    if (notified) {
+      const url = new URL(location.href);
+      if (url.searchParams.has("match")) {
+        url.searchParams.delete("match");
+        history.replaceState(history.state, "", url);
+      }
+    }
+    if (timerId && notified) timerScreen(notified);
+    else {
+      app.append(el("h1", {}, "Match"), notified ? gameCard(notified) : muted("This match is no longer available."),
+        button("Back", () => { notificationGameId = ""; render(); }));
+    }
+  }
   else if (timerId && byGame(timerId)) timerScreen(byGame(timerId));
   else ({Home:home,Results:results,Players:players,Table:table,Profile:profile}[page] || home)();
   if (horizontal) {
@@ -766,13 +909,83 @@ pushRegistration.then(async registration => {
   }
 });
 navigator.serviceWorker?.addEventListener("message", event => {
-  if (event.data?.type === "match-notice") { page = "Home"; sync(); }
+  if (event.data?.type === "match-notice") {
+    notificationGameId = event.data.gameId || "";
+    timerId = "";
+    page = "Home";
+    render();
+    sync();
+  }
 });
 function refreshWhenVisible() {
   if (document.hidden) return;
   sync();
   checkForWebUpdate();
 }
+function poolBall(extraClass = "") {
+  return el("span", {class:"eight-ball " + extraClass, "aria-hidden":"true"},
+    el("span", {class:"ball-number"}, "8"));
+}
+const pullBall = poolBall("pull-ball");
+const pullShot = el("div", {class:"pull-shot", hidden:true, "aria-hidden":"true"},
+  el("span", {class:"pull-cue"}), pullBall);
+const poolColors = ["#e5ba39","#2469b1","#b73b37","#754093","#d97833","#368358","#792d38","#171c19"];
+document.body.append(pullShot);
+let pullStart, pullDistance = 0, pullLoading = false;
+function canPull() {
+  return token && !timerId && !notificationGameId &&
+    ["Home","Results"].includes(page) && !document.querySelector("dialog[open]");
+}
+document.addEventListener("touchstart", event => {
+  if (!canPull() || scrollY > 0 || pullLoading || event.touches.length !== 1) return;
+  pullStart = [event.touches[0].clientX,event.touches[0].clientY];
+  const number = 1 + Math.floor(Math.random() * 15);
+  pullBall.querySelector(".ball-number").textContent = number;
+  pullBall.style.setProperty("--pool-color", poolColors[(number - 1) % poolColors.length]);
+  pullBall.classList.toggle("striped", number > 8);
+}, {passive:true});
+document.addEventListener("touchmove", event => {
+  if (!pullStart || !canPull() || event.touches.length !== 1) return;
+  const touch = event.touches[0], downward = touch.clientY - pullStart[1];
+  if (downward < 0 || Math.abs(touch.clientX - pullStart[0]) > downward) {
+    pullStart = undefined;
+    pullDistance = 0;
+    pullShot.hidden = true;
+    return;
+  }
+  if (downward < 12) return;
+  if (event.cancelable) event.preventDefault();
+  pullDistance = Math.min(105,downward);
+  pullShot.hidden = false;
+  if (!reducedMotion.matches) {
+    pullShot.style.setProperty("--pull-offset", (pullDistance * .55) + "px");
+    pullShot.style.setProperty("--cue-draw", (-pullDistance * .55) + "px");
+  }
+}, {passive:false});
+async function finishPull(refresh) {
+  pullStart = undefined;
+  if (pullLoading || pullShot.hidden) return;
+  const ready = refresh && pullDistance >= 70 && canPull();
+  pullDistance = 0;
+  if (!ready) { pullShot.hidden = true; return; }
+  pullLoading = true;
+  const animate = !reducedMotion.matches;
+  if (animate) pullShot.classList.add("refresh-strike");
+  try {
+    await Promise.all([sync(), animate && new Promise(resolve => setTimeout(resolve, 400))]);
+  }
+  finally {
+    pullBall.classList.add("refresh-settle");
+    setTimeout(() => {
+      pullShot.hidden = true;
+      pullShot.classList.remove("refresh-strike");
+      pullBall.classList.remove("refresh-settle");
+      pullLoading = false;
+    }, animate ? 220 : 0);
+  }
+}
+document.addEventListener("touchend", () => finishPull(true), {passive:true});
+document.addEventListener("touchcancel", () => finishPull(false), {passive:true});
 document.addEventListener("visibilitychange", refreshWhenVisible);
 window.addEventListener("online", refreshWhenVisible);
 systemAppearance.addEventListener("change", () => {

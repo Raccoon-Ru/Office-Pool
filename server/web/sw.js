@@ -31,17 +31,19 @@ self.addEventListener("push", event => {
   const message = event.data ? event.data.json() : {};
   event.waitUntil(self.registration.showNotification(message.title || "Cue Club", {
     body: message.body || "Open Cue Club for your match update.",
-    tag: message.tag || "cue-club", icon: "/cue-club/icon.jpg"
+    tag: message.tag || "cue-club", icon: "/cue-club/icon.jpg",
+    data: {gameId: typeof message.gameId === "string" ? message.gameId : ""}
   }));
 });
 self.addEventListener("notificationclick", event => {
   event.notification.close();
+  const gameId = event.notification.data?.gameId || "";
   event.waitUntil(self.clients.matchAll({type:"window", includeUncontrolled:true}).then(clients => {
     const existing = clients.find(client => new URL(client.url).pathname.startsWith("/cue-club/"));
     if (existing) {
-      existing.postMessage({type:"match-notice"});
+      existing.postMessage({type:"match-notice", gameId});
       return existing.focus();
     }
-    return self.clients.openWindow("/cue-club/");
+    return self.clients.openWindow("/cue-club/" + (gameId ? "?match=" + encodeURIComponent(gameId) : ""));
   }));
 });

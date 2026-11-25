@@ -21,6 +21,7 @@ import java.util.concurrent.Executors;
 
 public final class MatchInboxService extends Service {
     static final String LEAGUE_NOTIFICATION = "officepool.leagueNotification";
+    static final String MATCH_NOTIFICATION_ID = "officepool.matchNotificationId";
     static final String CHANNEL = "cue_club_matches";
     private static final long POLL_INTERVAL_MS = 30_000;
     private static final int ONGOING_ID = 7101;
@@ -171,6 +172,7 @@ public final class MatchInboxService extends Service {
         Intent open =
                 new Intent(this, MainActivity.class)
                         .putExtra(LEAGUE_NOTIFICATION, leagueMatch)
+                        .putExtra(MATCH_NOTIFICATION_ID, id)
                         .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent tap =
                 PendingIntent.getActivity(
