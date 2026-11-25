@@ -47,6 +47,8 @@ WEB_VERSION = hashlib.sha256(
 ).hexdigest()
 ANDROID_RELEASES = HERE / "releases"
 ANDROID_APK = ANDROID_RELEASES / "cue-club.apk"
+ANDROID_MANIFEST = ANDROID_RELEASES / "android.json"
+ANDROID_APK_PATH = "/updates/android/cue-club.apk"
 
 ON_RENDER = os.environ.get("RENDER", "").lower() == "true"
 HOST = os.environ.get("OFFICE_POOL_HOST", "0.0.0.0" if ON_RENDER else "127.0.0.1")
@@ -596,7 +598,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         path = urlparse(self.path).path
-        if path == "/updates/android/cue-club.apk":
+        if path == ANDROID_APK_PATH:
             self.serve_android_apk(head=True)
             return
         self.serve_web_asset(path, head=True)
@@ -659,11 +661,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"version": WEB_VERSION})
             return
         if path == "/updates/android":
-            manifest = ANDROID_RELEASES / "android.json"
-            release = json.loads(manifest.read_text(encoding="utf-8")) if ANDROID_APK.is_file() and manifest.is_file() else {}
+            release = {}
+            if ANDROID_APK.is_file() and ANDROID_MANIFEST.is_file():
+                release = json.loads(ANDROID_MANIFEST.read_text(encoding="utf-8"))
             self.send_json(200, release)
             return
-        if path == "/updates/android/cue-club.apk":
+        if path == ANDROID_APK_PATH:
             self.serve_android_apk()
             return
         if path == "/cue-club" or path.startswith("/cue-club/"):

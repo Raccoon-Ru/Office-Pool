@@ -17,11 +17,15 @@ try {
     & .\gradlew.bat assembleDebug -PcueClubServerUrl=https://office-pool.onrender.com
     if ($LASTEXITCODE -ne 0) { throw 'Android build failed.' }
     $buildDirectory = Join-Path $repository 'app/build/outputs/apk/debug'
-    $build = (Get-Content -LiteralPath (Join-Path $buildDirectory 'output-metadata.json') -Raw | ConvertFrom-Json).elements
+    $buildMetadata = Join-Path $buildDirectory 'output-metadata.json'
+    $build = (Get-Content -LiteralPath $buildMetadata -Raw | ConvertFrom-Json).elements
     if ($build.Count -ne 1) { throw 'Expected exactly one APK.' }
     $apk = $build[0]
-    if ((Test-Path -LiteralPath $manifest) -and $apk.versionCode -le (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).versionCode) {
-        throw 'Increase versionCode and versionName in app/build.gradle before publishing an update.'
+    if (Test-Path -LiteralPath $manifest) {
+        $publishedVersion = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+        if ($apk.versionCode -le $publishedVersion.versionCode) {
+            throw 'Increase versionCode and versionName in app/build.gradle before publishing an update.'
+        }
     }
     $candidate = Join-Path $buildDirectory $apk.outputFile
     $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA 'Android/Sdk' }

@@ -4,6 +4,7 @@ const app = document.querySelector("#app"), header = document.querySelector("#he
   nav = document.querySelector("#tabs"), status = document.querySelector("#status");
 const updateNotice = document.querySelector("#app-update");
 const loadedVersion = document.querySelector('meta[name="cue-club-version"]')?.content;
+const UPDATE_CHECK_INTERVAL_MS = 60_000;
 let nextUpdateCheck = 0;
 const base = "/cue-club/";
 const tabs = ["Home", "Results", "Players", "Table", "Profile"];
@@ -60,8 +61,10 @@ async function api(path, method = "GET", body = undefined) {
   return payload;
 }
 async function checkForWebUpdate() {
-  if (!loadedVersion || document.hidden || Date.now() < nextUpdateCheck || updateNotice.childElementCount) return;
-  nextUpdateCheck = Date.now() + 60_000;
+  if (!loadedVersion || !updateNotice || updateNotice.childElementCount) return;
+  const now = Date.now();
+  if (now < nextUpdateCheck) return;
+  nextUpdateCheck = now + UPDATE_CHECK_INTERVAL_MS;
   try {
     const response = await fetch("/updates/web", {cache:"no-store"});
     if (!response.ok) return;
@@ -70,7 +73,10 @@ async function checkForWebUpdate() {
     updateNotice.append(
       el("span", {}, "A Cue Club update is available."),
       button("Reload", () => {
-        if (writing) { toast("Wait for your change to finish before reloading."); return; }
+        if (writing) {
+          toast("Wait for your change to finish before reloading.");
+          return;
+        }
         window.location.reload();
       }, true)
     );

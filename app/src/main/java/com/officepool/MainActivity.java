@@ -26,6 +26,9 @@ public class MainActivity extends Activity {
     private boolean darkAppearance;
     private static final String DEFAULT_SERVER_URL = BuildConfig.CUE_CLUB_SERVER_URL;
     private static final String FORMER_SERVER_URL = "https://acumen-ruan2024.tail49ffe5.ts.net";
+    private static final String ANDROID_UPDATE_PATH = "/updates/android";
+    private static final long UPDATE_RETRY_MS = 60_000;
+    private static final long UPDATE_CHECK_INTERVAL_MS = 15 * 60_000;
     static final String WORK_DOMAIN = "@acumensoft.net";
     static final String PREFERENCES_NAME = "MainActivity";
     static final int PICK_PHOTO = 4102;
@@ -3109,32 +3112,40 @@ public class MainActivity extends Activity {
     private void checkForAppUpdate() {
         long now = SystemClock.elapsedRealtime();
         if (now < nextUpdateCheck || !timerGameId.isEmpty()) return;
-        nextUpdateCheck = now + 60_000;
-        io.execute(() -> {
-            try {
-                JSONObject release = new OfficeApi(DEFAULT_SERVER_URL).get("/updates/android", "");
-                int version = release.optInt("versionCode");
-                String name = release.optString("versionName");
-                runOnUiThread(() -> {
-                    if (!foreground || isFinishing() || isDestroyed() || !timerGameId.isEmpty()) return;
-                    nextUpdateCheck = SystemClock.elapsedRealtime() + 15 * 60_000;
-                    if (version <= Math.max(BuildConfig.VERSION_CODE, offeredUpdate) || name.isEmpty()) return;
-                    offeredUpdate = version;
-                    new AlertDialog.Builder(this)
-                            .setTitle("Cue Club update available")
-                            .setMessage("Version " + name + " is ready. Download the APK, then open it to install the update.")
-                            .setNegativeButton("Later", null)
-                            .setPositiveButton("Download", (dialog, which) -> downloadAppUpdate())
-                            .show();
+        nextUpdateCheck = now + UPDATE_RETRY_MS;
+        io.execute(
+                () -> {
+                    try {
+                        JSONObject release =
+                                new OfficeApi(DEFAULT_SERVER_URL).get(ANDROID_UPDATE_PATH, "");
+                        int versionCode = release.optInt("versionCode");
+                        String versionName = release.optString("versionName");
+                        runOnUiThread(() -> offerAppUpdate(versionCode, versionName));
+                    } catch (Exception ignored) {
+                        // The next poll after the retry interval can try again.
+                    }
                 });
-            } catch (Exception ignored) {
-                // Try again after the retry interval when the update server is reachable.
-            }
-        });
+    }
+
+    private void offerAppUpdate(int versionCode, String versionName) {
+        if (!foreground || isFinishing() || isDestroyed() || !timerGameId.isEmpty()) return;
+        nextUpdateCheck = SystemClock.elapsedRealtime() + UPDATE_CHECK_INTERVAL_MS;
+        if (versionCode <= Math.max(BuildConfig.VERSION_CODE, offeredUpdate)
+                || versionName.isEmpty()) return;
+
+        offeredUpdate = versionCode;
+        new AlertDialog.Builder(this)
+                .setTitle("Cue Club update available")
+                .setMessage(
+                        "Version " + versionName
+                                + " is ready. Download the APK, then open it to install the update.")
+                .setNegativeButton("Later", null)
+                .setPositiveButton("Download", (dialog, which) -> downloadAppUpdate())
+                .show();
     }
 
     private void downloadAppUpdate() {
-        Uri apk = Uri.parse(DEFAULT_SERVER_URL + "/updates/android/cue-club.apk");
+        Uri apk = Uri.parse(DEFAULT_SERVER_URL + ANDROID_UPDATE_PATH + "/cue-club.apk");
         try {
             startActivity(new Intent(Intent.ACTION_VIEW, apk));
         } catch (ActivityNotFoundException e) {
