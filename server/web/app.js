@@ -683,20 +683,61 @@ function ratingChart(points) {
   return canvas;
 }
 function editProfile() {
-  const [nameField,name] = field("Display name", {value:self()?.displayName || "", maxlength:48, required:true});
-  const [photoField,photo] = field("Profile photo · up to 12 MB", {type:"file", accept:"image/jpeg,image/png,image/webp"});
-  const dialog = prompt("Your profile", nameField, photoField, button("Save profile", async () => {
-    if (!name.reportValidity() || !name.value.trim()) return;
-    const selected = photo.files[0];
-    if (selected && (!["image/jpeg","image/png","image/webp"].includes(selected.type) || selected.size > 12*1024*1024)) {
-      toast("Choose a JPEG, PNG, or WebP photo of 12 MB or less.");
+  const person = self();
+  const [nameField,name] = field("Display name", {value:person?.displayName || "", maxlength:48, required:true});
+  const photo = el("input", {type:"file", accept:"image/jpeg,image/png,image/webp", hidden:true});
+  const draft = el("img", {class:"draft-avatar", alt:"", hidden:true});
+  const preview = el("div", {class:"profile-editor-avatar"}, avatar(person), draft);
+  const feedback = el("p", {class:"profile-editor-feedback", role:"status", hidden:true});
+  let selected, previewUrl;
+  function showFeedback(message, error = false) {
+    feedback.textContent = message;
+    feedback.classList.toggle("offline", error);
+    feedback.hidden = false;
+  }
+  photo.addEventListener("change", () => {
+    const candidate = photo.files[0];
+    if (!candidate) return;
+    if (!["image/jpeg","image/png","image/webp"].includes(candidate.type) || candidate.size > 12*1024*1024) {
+      showFeedback("Choose a JPEG, PNG, or WebP photo of 12 MB or less.", true);
       return;
     }
-    if (name.value.trim() !== self()?.displayName && !await change("/profiles/me",{displayName:name.value.trim()}, "", "PUT")) return;
-    if (selected && !await change("/profiles/me/photo", selected, "")) return;
-    toast("Profile updated.");
-    dialog.close();
-  }, true));
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    selected = candidate;
+    previewUrl = URL.createObjectURL(candidate);
+    draft.src = previewUrl;
+    draft.hidden = false;
+    showFeedback("Photo ready to save.");
+  });
+  const choose = button("Change photo", () => photo.click());
+  const cancel = button("Cancel", () => dialog.close());
+  const save = el("button", {class:"primary", type:"submit"}, "Save changes");
+  const title = el("h2", {id:"edit-profile-title"}, "Edit profile");
+  const form = el("form", {onsubmit:async event => {
+    event.preventDefault();
+    if (save.disabled) return;
+    const displayName = name.value.trim();
+    if (!displayName) { showFeedback("Enter a display name.", true); name.focus(); return; }
+    save.disabled = cancel.disabled = choose.disabled = true;
+    try {
+      if (displayName !== self()?.displayName && !await change("/profiles/me",{displayName}, "", "PUT")) return;
+      if (selected && !await change("/profiles/me/photo", selected, "")) return;
+      toast("Profile saved.");
+      dialog.close();
+    } finally {
+      save.disabled = cancel.disabled = choose.disabled = false;
+    }
+  }},
+    el("div", {class:"profile-editor-photo"}, preview,
+      el("div", {}, choose, el("small", {}, "JPEG, PNG or WebP · up to 12 MB"))),
+    photo, nameField, feedback, el("div", {class:"profile-editor-footer"}, cancel, save));
+  const dialog = el("dialog", {class:"profile-editor","aria-labelledby":"edit-profile-title"}, title, form);
+  dialog.addEventListener("close", () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    dialog.remove();
+  }, {once:true});
+  document.body.append(dialog);
+  dialog.showModal();
 }
 function adminPanel() {
   if (!data.isAdmin) return;

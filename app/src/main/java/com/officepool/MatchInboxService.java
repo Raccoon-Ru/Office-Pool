@@ -89,7 +89,7 @@ public final class MatchInboxService extends Service {
     private void pollInbox() {
         if (stopped || busy) return;
         String token = prefs.getString("token", "");
-        String base = prefs.getString("serverUrl", "");
+        String base = BuildConfig.CUE_CLUB_SERVER_URL;
         if (token.isEmpty() || base.isEmpty()) {
             handler.postDelayed(poll, POLL_INTERVAL_MS);
             return;

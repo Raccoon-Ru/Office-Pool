@@ -25,7 +25,6 @@ public class MainActivity extends Activity {
     private int INK, MUTED, BG, CARD, LINE, featuredPanel;
     private boolean darkAppearance;
     private static final String DEFAULT_SERVER_URL = BuildConfig.CUE_CLUB_SERVER_URL;
-    private static final String FORMER_SERVER_URL = "https://acumen-ruan2024.tail49ffe5.ts.net";
     private static final String ANDROID_UPDATE_PATH = "/updates/android";
     private static final String ACCOUNT_DELETION_PATH = "/profiles/me/account-deletion";
     private static final long UPDATE_RETRY_MS = 60_000;
@@ -77,7 +76,8 @@ public class MainActivity extends Activity {
     long draftLeagueDeadline;
     String draftLeagueName = "Office League";
     SharedPreferences prefs;
-    String serverUrl = "", uid = "", sessionName = "";
+    private final String serverUrl = DEFAULT_SERVER_URL;
+    String uid = "", sessionName = "";
     private volatile String token = "";
     volatile boolean online = false, syncBusy = false;
     boolean createAccount = false, isAdmin = false, showAdminPanel = false;
@@ -215,11 +215,6 @@ public class MainActivity extends Activity {
     }
 
     void load() {
-        serverUrl = prefs.getString("serverUrl", DEFAULT_SERVER_URL);
-        String configured = serverUrl.trim().replaceAll("/+$", "");
-        if (configured.isEmpty() || configured.equalsIgnoreCase(FORMER_SERVER_URL)) {
-            serverUrl = DEFAULT_SERVER_URL;
-        }
         token = prefs.getString("token", "");
         uid = prefs.getString("uid", "");
         sessionName = prefs.getString("sessionName", "");
@@ -271,7 +266,6 @@ public class MainActivity extends Activity {
         JSONArray p = new JSONArray();
         for (OfficeMember x : members) p.put(x.toJson());
         prefs.edit()
-                .putString("serverUrl", serverUrl)
                 .putString("token", token)
                 .putString("uid", uid)
                 .putString("sessionName", sessionName)
@@ -745,22 +739,6 @@ public class MainActivity extends Activity {
                 createAccount
                         ? "Use your Acumensoft work email to join the shared scorebook."
                         : "Sign in to see the shared players and scores.");
-        TextView label = lineLabel("PC SERVER ADDRESS");
-        content.addView(label);
-        EditText address = input("https://your-pc.your-tailnet.ts.net", false);
-        address.setText(serverUrl);
-        LinearLayout.LayoutParams p = lp(-1, 54);
-        p.topMargin = dp(7);
-        p.bottomMargin = dp(8);
-        content.addView(address, p);
-        TextView note =
-                text(
-                        "Your PC hosts the league. This shows Offline whenever that server can’t be"
-                                + " reached.",
-                        12,
-                        MUTED,
-                        false);
-        content.addView(note, lp(-1, -2));
         LinearLayout form = vertical();
         pad(form, 18, 16, 18, 16);
         form.setBackground(shape(CARD, 20));
@@ -790,7 +768,6 @@ public class MainActivity extends Activity {
             form.addView(join, bp);
             join.setOnClickListener(
                     v -> {
-                        serverUrl = address.getText().toString().trim();
                         register(
                                 em.getText().toString().trim(),
                                 pw.getText().toString(),
@@ -812,7 +789,6 @@ public class MainActivity extends Activity {
             form.addView(sign, bp);
             sign.setOnClickListener(
                     v -> {
-                        serverUrl = address.getText().toString().trim();
                         login(em.getText().toString().trim(), pw.getText().toString());
                     });
         }
@@ -830,20 +806,9 @@ public class MainActivity extends Activity {
         content.addView(swap, sw);
         swap.setOnClickListener(
                 v -> {
-                    serverUrl = address.getText().toString().trim();
                     createAccount = !createAccount;
                     showAuth();
                 });
-        TextView steps =
-                text(
-                        "Use your office join code to create a profile. Your PC hosts the shared"
-                                + " league.",
-                        12,
-                        MUTED,
-                        false);
-        LinearLayout.LayoutParams st = lp(-1, -2);
-        st.topMargin = dp(10);
-        content.addView(steps, st);
     }
 
     View spacer(int h) {
@@ -864,10 +829,6 @@ public class MainActivity extends Activity {
     }
 
     void login(String email, String password) {
-        if (!validServer()) {
-            toast("Enter the PC's HTTPS Tailscale address first.");
-            return;
-        }
         if (!email.toLowerCase(Locale.ROOT).endsWith(WORK_DOMAIN)) {
             toast("Use your @acumensoft.net work email.");
             return;
@@ -889,7 +850,7 @@ public class MainActivity extends Activity {
                                         new JSONObject()
                                                 .put("email", email)
                                                 .put("password", password));
-                        onAuthSuccess(base, result);
+                        onAuthSuccess(result);
                     } catch (Exception e) {
                         runOnUiThread(() -> toast(errorText(e)));
                     }
@@ -897,10 +858,6 @@ public class MainActivity extends Activity {
     }
 
     void register(String email, String password, String name, String joinCode) {
-        if (!validServer()) {
-            toast("Enter the PC's HTTPS Tailscale address first.");
-            return;
-        }
         if (!email.toLowerCase(Locale.ROOT).endsWith(WORK_DOMAIN)) {
             toast("Use your @acumensoft.net work email.");
             return;
@@ -924,34 +881,18 @@ public class MainActivity extends Activity {
                                                 .put("password", password)
                                                 .put("displayName", name)
                                                 .put("joinCode", joinCode));
-                        onAuthSuccess(base, result);
+                        onAuthSuccess(result);
                     } catch (Exception e) {
                         runOnUiThread(() -> toast(errorText(e)));
                     }
                 });
     }
 
-    boolean validServer() {
-        try {
-            URL u = new URL(serverUrl.trim());
-            String host = u.getHost();
-            return host != null
-                    && !host.isEmpty()
-                    && ("https".equalsIgnoreCase(u.getProtocol())
-                            || ("http".equalsIgnoreCase(u.getProtocol())
-                                    && (host.equals("127.0.0.1")
-                                            || host.equalsIgnoreCase("localhost"))));
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    void onAuthSuccess(String base, JSONObject r) {
+    void onAuthSuccess(JSONObject r) {
         token = r.optString("token");
         uid = r.optJSONObject("member").optString("uid");
         sessionName = r.optJSONObject("member").optString("displayName");
         isAdmin = r.optJSONObject("member").optBoolean("isAdmin", false);
-        serverUrl = base;
         OfficeMember self = OfficeMember.fromJson(r.optJSONObject("member"));
         if (memberByUid(uid) == null) members.add(self);
         save();
@@ -1036,13 +977,6 @@ public class MainActivity extends Activity {
         if (!token.isEmpty()) {
             addHomeMatchButton(
                     menu,
-                    "Server address",
-                    () -> {
-                        dialog.dismiss();
-                        serverSettings();
-                    });
-            addHomeMatchButton(
-                    menu,
                     "Sign out",
                     () -> {
                         dialog.dismiss();
@@ -1118,25 +1052,6 @@ public class MainActivity extends Activity {
                 }
             });
         });
-    }
-
-    void serverSettings() {
-        if (token.isEmpty()) return;
-        EditText address = input("https://your-pc.your-tailnet.ts.net", false);
-        address.setText(serverUrl);
-        new AlertDialog.Builder(this)
-                .setTitle("Server address")
-                .setMessage("Use the HTTPS URL shown by Tailscale Serve.")
-                .setView(address)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton(
-                        "Save and reconnect",
-                        (d, w) -> {
-                            serverUrl = address.getText().toString().trim();
-                            save();
-                            syncNow();
-                        })
-                .show();
     }
 
     void logout() {
@@ -3266,23 +3181,176 @@ public class MainActivity extends Activity {
         parent.addView(d, lp(-1, 1));
     }
 
+    private ProfileEditor profileEditor;
+
     void editProfile() {
-        EditText name = input("Display name", false);
-        name.setText(sessionName);
-        AlertDialog d =
-                new AlertDialog.Builder(this)
-                        .setTitle("Your office profile")
-                        .setView(name)
-                        .setNegativeButton("Cancel", null)
-                        .setNeutralButton("Change photo", (x, w) -> pickPhoto())
-                        .setPositiveButton(
-                                "Save name",
-                                (x, w) -> saveProfileName(name.getText().toString().trim()))
-                        .create();
-        d.show();
-        d.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(MUTED);
-        d.getButton(AlertDialog.BUTTON_NEUTRAL).setTextColor(INK);
-        d.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(INK);
+        profileEditor = new ProfileEditor();
+        profileEditor.show();
+    }
+
+    private final class ProfileEditor {
+        private final Dialog dialog = new Dialog(MainActivity.this);
+        private final EditText name = input("Display name", false);
+        private final TextView message = text("", 12, MUTED, false);
+        private final TextView saveButton = button("Save changes");
+        private final FrameLayout preview = avatar(currentName(), memberByUid(uid));
+        private final ImageView selectedPreview = new ImageView(MainActivity.this);
+        private final String owner = uid;
+        private File photo;
+        private String mime;
+
+        void show() {
+            dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+            LinearLayout panel = vertical();
+            pad(panel, 22, 20, 22, 18);
+            GradientDrawable surface = shape(CARD, 24);
+            surface.setStroke(dp(1), LINE);
+            panel.setBackground(surface);
+            panel.setFocusableInTouchMode(true);
+            panel.addView(text("Edit profile", 23, INK, true));
+            panel.addView(spacer(18));
+
+            LinearLayout portrait = horizontal();
+            selectedPreview.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            selectedPreview.setVisibility(View.GONE);
+            preview.addView(selectedPreview, new FrameLayout.LayoutParams(-1, -1));
+            portrait.addView(preview, lp(76, 76));
+            LinearLayout photoControls = vertical();
+            pad(photoControls, 14, 0, 0, 0);
+            TextView choose = secondaryProfileButton("Change photo");
+            choose.setOnClickListener(view -> pickPhoto());
+            photoControls.addView(choose, lp(-2, -2));
+            photoControls.addView(spacer(4));
+            photoControls.addView(text("JPEG, PNG or WebP · up to 12 MB", 11, MUTED, false));
+            portrait.addView(photoControls, new LinearLayout.LayoutParams(0, -2, 1));
+            panel.addView(portrait);
+            panel.addView(spacer(20));
+
+            panel.addView(text("Display name", 13, INK, true));
+            panel.addView(spacer(6));
+            name.setText(sessionName);
+            name.setFilters(new android.text.InputFilter[] {new android.text.InputFilter.LengthFilter(48)});
+            name.setContentDescription("Display name");
+            GradientDrawable field = shape(BG, 13);
+            field.setStroke(dp(1), LINE);
+            name.setBackground(field);
+            pad(name, 14, 0, 14, 0);
+            panel.addView(name, lp(-1, 52));
+            message.setVisibility(View.GONE);
+            panel.addView(message, lp(-1, -2));
+            panel.addView(spacer(16));
+
+            LinearLayout actions = horizontal();
+            TextView cancel = secondaryProfileButton("Cancel");
+            cancel.setOnClickListener(view -> dialog.dismiss());
+            actions.addView(cancel, lp(-2, -2));
+            LinearLayout.LayoutParams savePosition = new LinearLayout.LayoutParams(0, -2, 1);
+            savePosition.leftMargin = dp(10);
+            actions.addView(saveButton, savePosition);
+            saveButton.setOnClickListener(view -> saveEdits());
+            panel.addView(actions);
+            ScrollView scroll = new ScrollView(MainActivity.this);
+            scroll.setFillViewport(true);
+            scroll.addView(panel);
+            dialog.setContentView(scroll);
+            dialog.setOnDismissListener(ignored -> {
+                if (photo != null) photo.delete();
+                if (profileEditor == this) profileEditor = null;
+            });
+            dialog.show();
+            Window window = dialog.getWindow();
+            if (window != null) {
+                window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+                window.setLayout(Math.min(getResources().getDisplayMetrics().widthPixels - dp(32), dp(420)), -2);
+                window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
+                        | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+            }
+            panel.requestFocus();
+        }
+
+        void selectPhoto(Uri uri) {
+            String type = getContentResolver().getType(uri);
+            if (!"image/jpeg".equals(type) && !"image/png".equals(type) && !"image/webp".equals(type)) {
+                status("Choose a JPEG, PNG, or WebP photo.", true);
+                return;
+            }
+            saveButton.setEnabled(false);
+            status("Preparing photo…", false);
+            io.execute(() -> {
+                File file = null;
+                try {
+                    file = readProfilePhoto(uri, type);
+                    Bitmap bitmap = decodeAvatar(file);
+                    if (bitmap == null) throw new IOException("Could not preview this photo.");
+                    File selected = file;
+                    runOnUiThread(() -> {
+                        if (profileEditor != this || !dialog.isShowing()) {
+                            selected.delete();
+                            return;
+                        }
+                        if (photo != null) photo.delete();
+                        photo = selected;
+                        mime = type;
+                        selectedPreview.setImageBitmap(bitmap);
+                        selectedPreview.setVisibility(View.VISIBLE);
+                        saveButton.setEnabled(true);
+                        status("Photo ready to save.", false);
+                    });
+                } catch (Exception error) {
+                    if (file != null) file.delete();
+                    runOnUiThread(() -> {
+                        if (profileEditor != this) return;
+                        saveButton.setEnabled(true);
+                        status(errorText(error), true);
+                    });
+                }
+            });
+        }
+
+        private void status(String value, boolean error) {
+            message.setTextColor(error ? tone(0xff923E32, 0xffFFD0C6) : MUTED);
+            message.setText(value);
+            message.setVisibility(View.VISIBLE);
+        }
+
+        private void saveEdits() {
+            String value = name.getText().toString().trim();
+            if (value.isEmpty()) {
+                status("Enter a display name.", true);
+                name.requestFocus();
+                return;
+            }
+            if (!owner.equals(uid) || token.isEmpty()) {
+                dialog.dismiss();
+                return;
+            }
+            boolean photoChanged = photo != null;
+            if (photoChanged) {
+                File previous = pendingPhoto(owner);
+                prefs.edit().putBoolean("pendingPhoto", true)
+                        .putString("pendingPhotoMime", mime)
+                        .putString("pendingPhotoOwner", owner)
+                        .putString("pendingPhotoFile", photo.getName()).apply();
+                photo = null;
+                if (previous != null) previous.delete();
+            }
+            dialog.dismiss();
+            if (!value.equals(sessionName)) saveProfileName(value);
+            else if (photoChanged) {
+                show();
+                syncNow();
+            } else return;
+            toast(online ? "Profile saved." : "Profile saved on this phone · waiting to sync");
+        }
+    }
+
+    private TextView secondaryProfileButton(String label) {
+        TextView control = button(label);
+        control.setTextColor(INK);
+        GradientDrawable outline = shape(CARD, 14);
+        outline.setStroke(dp(1), LINE);
+        control.setBackground(outline);
+        return control;
     }
 
     void saveProfileName(String name) {
@@ -3322,59 +3390,31 @@ public class MainActivity extends Activity {
         super.onActivityResult(req, result, data);
         if (req != PICK_PHOTO || result != RESULT_OK || data == null || data.getData() == null)
             return;
-        Uri uri = data.getData();
-        String playerId = uid;
-        String mime = getContentResolver().getType(uri);
-        if (!"image/jpeg".equals(mime) && !"image/png".equals(mime) && !"image/webp".equals(mime)) {
-            toast("Choose a JPEG, PNG, or WebP photo.");
-            return;
-        }
-        io.execute(() -> stageProfilePhoto(uri, playerId, mime));
+        if (profileEditor != null) profileEditor.selectPhoto(data.getData());
     }
 
-    private void stageProfilePhoto(Uri uri, String playerId, String mime) {
-        File staged = null;
+    private File readProfilePhoto(Uri uri, String mime) throws IOException {
+        File file = File.createTempFile("pending-photo-", ".image", getFilesDir());
+        boolean valid = false;
         try {
-            staged = File.createTempFile("pending-photo-", ".image", getFilesDir());
             try (InputStream in = getContentResolver().openInputStream(uri);
-                    OutputStream out = new FileOutputStream(staged)) {
+                    OutputStream out = new FileOutputStream(file)) {
                 if (in == null) throw new IOException("Could not open the selected photo.");
                 OfficeApi.copy(in, out, MAX_PHOTO_BYTES);
-            } catch (IOException e) {
-                if ("File is too large.".equals(e.getMessage()))
-                    throw new IOException(PHOTO_LIMIT_MESSAGE);
-                throw e;
+            } catch (IOException error) {
+                if ("File is too large.".equals(error.getMessage())) throw new IOException(PHOTO_LIMIT_MESSAGE);
+                throw error;
             }
             BitmapFactory.Options bounds = new BitmapFactory.Options();
             bounds.inJustDecodeBounds = true;
-            BitmapFactory.decodeFile(staged.getAbsolutePath(), bounds);
-            if (!mime.equals(bounds.outMimeType))
-                throw new IOException(
-                        "Choose a valid " + mime.substring(6).toUpperCase(Locale.ROOT) + " photo.");
-            if (!playerId.equals(uid) || token.isEmpty()) return;
-            File previous = pendingPhoto(playerId);
-            prefs.edit()
-                    .putBoolean("pendingPhoto", true)
-                    .putString("pendingPhotoMime", mime)
-                    .putString("pendingPhotoOwner", playerId)
-                    .putString("pendingPhotoFile", staged.getName())
-                    .apply();
-            staged = null;
-            if (previous != null) previous.delete();
-            runOnUiThread(
-                    () -> {
-                        show();
-                        syncNow();
-                        toast(
-                                online
-                                        ? "Photo saved and syncing."
-                                        : "Photo saved offline; it will upload when the PC"
-                                                + " returns.");
-                    });
-        } catch (Exception e) {
-            runOnUiThread(() -> toast(errorText(e)));
+            BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+            if (!mime.equals(bounds.outMimeType)) {
+                throw new IOException("Choose a valid " + mime.substring(6).toUpperCase(Locale.ROOT) + " photo.");
+            }
+            valid = true;
+            return file;
         } finally {
-            if (staged != null) staged.delete();
+            if (!valid) file.delete();
         }
     }
 
@@ -3717,6 +3757,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (profileEditor != null) profileEditor.dialog.dismiss();
         avatarIo.shutdownNow();
         super.onDestroy();
     }

@@ -56,7 +56,7 @@ The server uses Render's `PORT`, enables the iPhone web app at `/cue-club/`, and
 
 For an existing PC installation, create a fresh verified ZIP with `server/backup_office_pool.py`. Run `python -m server.migrate_to_supabase <backup.zip>` with `DATABASE_URL` set securely in the migration environment. The command imports existing accounts, sessions, confirmed results, leagues and photos into an empty target. It cancels the import if the target already has Cue Club rows. Schedule the final backup and import during a pause in match activity to avoid recording results in two places. After verification, share the new Render `/cue-club/` link. iPhone users will sign in again and enable alerts on the new web address.
 
-Build the Android APK with `-PcueClubServerUrl=https://YOUR-SERVICE.onrender.com` to make Render the default and update installs using the former default address. Players can also update the server address from **My profile > Settings**.
+Cue Club's Android build uses the Render URL by default. Set `-PcueClubServerUrl=https://YOUR-SERVICE.onrender.com` when building for a different server.
 
 ## Publish an Android update
 
