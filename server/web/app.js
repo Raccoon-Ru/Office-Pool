@@ -84,7 +84,7 @@ async function checkForWebUpdate() {
 }
 function acceptSnapshot(snapshot) {
   if (snapshot.serverTimeMs) clockOffset = snapshot.serverTimeMs - Date.now();
-  const key = JSON.stringify([snapshot.members, snapshot.games, snapshot.season, snapshot.matches, snapshot.isAdmin, snapshot.ratingHistory, snapshot.playingNow]);
+  const key = JSON.stringify([snapshot.members, snapshot.games, snapshot.season, snapshot.matches, snapshot.isAdmin, snapshot.ratingHistory, snapshot.playingNow, snapshot.weeklyHighlights]);
   const changed = key !== lastKey || !online;
   data = snapshot;
   online = true;
@@ -245,7 +245,10 @@ function gameStatus(game) {
   if (!game) return "Ready to play";
   if (game.status === "invited") return game.playerBUid === uid ? "Invitation received" : "Waiting for acceptance";
   if (game.status === "active") return "Match in progress";
-  if (game.status === "awaiting_confirmation") return myReport(game) ? "Waiting for your opponent" : "Your opponent reported a winner";
+  if (game.status === "awaiting_confirmation") {
+    const opponent = game.playerAUid === uid ? game.playerBName : game.playerAName;
+    return myReport(game) ? "Waiting for " + opponent + " to confirm the result" : opponent + " reported a winner · your confirmation is needed";
+  }
   if (game.status === "disputed") return "Waiting for admin review";
   if (game.status === "confirmed") return "Winner · " + game.winnerName;
   return "Match closed";
@@ -293,6 +296,7 @@ function gameCard(game) {
 }
 function timerScreen(game) {
   const complete = game.status === "confirmed";
+  const result = complete && data.matches.find(match => match.id === game.statsMatchId);
   const intro = introPendingId === game.id && game.status === "active";
   introPendingId = "";
   function player(side, direction) {
@@ -300,12 +304,13 @@ function timerScreen(game) {
     return el("div", {class:"versus-player " + direction},
       avatar(byMember(game["player" + side + "Uid"]), name), el("strong", {}, name));
   }
-  app.append(el("h1", {}, complete ? "Match complete" : league(game) ? "League match" : "1v1 match"),
-    el("div", {class:intro ? "match-intro" : "matchup"},
+  app.append(el("h1", {}, complete ? "Match complete" : league(game) ? "League match" : "1v1 match"));
+  if (result) app.append(resultCard(result));
+  else app.append(el("div", {class:intro ? "match-intro" : "matchup"},
       el("div", {class:"versus-line"}, player("A","versus-left"), el("strong", {class:"versus-word"}, "VS"), player("B","versus-right")),
       card(el("div", {class:"kicker"}, complete ? "MATCH DURATION" : "ELAPSED TIME"),
-        el("div", {class:"clock", id:"clock"}, "00:00:00"), muted(gameStatus(game)), gameActions(game))),
-    button("Back to " + (league(game) ? "bracket" : "results"), () => {
+        el("div", {class:"clock", id:"clock"}, "00:00:00"), muted(gameStatus(game)), gameActions(game))));
+  app.append(button("Back to " + (league(game) ? "bracket" : "results"), () => {
       page = league(game) ? "Home" : "Results";
       timerId = "";
       render();
@@ -313,6 +318,10 @@ function timerScreen(game) {
   updateClock();
 }
 function updateClock() {
+  for (const clock of app.querySelectorAll("[data-table-started-at]")) {
+    const seconds = Math.floor((Date.now() + clockOffset - Date.parse(clock.dataset.tableStartedAt)) / 1000);
+    clock.textContent = Number.isFinite(seconds) ? formatTime(Math.max(0, seconds)) : "";
+  }
   const clock = document.querySelector("#clock"), game = byGame(timerId);
   if (!clock || !game) return;
   const finished = game.finishedAt ? Date.parse(game.finishedAt) : Date.now() + clockOffset;
@@ -337,7 +346,7 @@ function leagueTile(match, active) {
       icon, el("span", {}, first(name)));
   }
   const game = byGame(match.gameId);
-  return el("div", {class:"pair" + (yours ? " mine" : "")},
+  return el("div", {id:"league-" + match.id, tabindex:"-1", class:"pair" + (yours || match.onMyRoute ? " mine" : "")},
     el("div", {class:"row"}, person("A"), el("small", {}, "VS"), person("B")),
     el("small", {}, match.winnerName ? "Winner · " + first(match.winnerName) :
       match.status === "bye" ? "Advances with a bye" : !active ? "Closed" :
@@ -354,8 +363,13 @@ function bracket(season) {
       tournament.matches.filter(match => match.round === i).map(match => leagueTile(match, active))));
   }
   app.append(card(el("small", {class:"kicker"}, "OFFICE LEAGUE"), el("h2", {}, season.name),
-    tournament.championName ? muted("Champion · " + tournament.championName) : !active ? muted("League closed") :
-      season.deadlineMs ? muted("Ends " + new Date(season.deadlineMs - 1).toLocaleDateString()) : null,
+    tournament.championName ? el("p", {class:"champion"}, "Champion · " + tournament.championName) : !active ? muted("League closed") :
+      season.deadlineMs ? el("p", {}, "Deadline · " + new Date(season.deadlineMs - 1).toLocaleDateString()) : null,
+    tournament.myMatchId && button("Jump to my match", () => {
+      const tile = document.getElementById("league-" + tournament.myMatchId);
+      tile?.focus({preventScroll:true});
+      tile?.scrollIntoView({block:"center", inline:"center"});
+    }),
     el("div", {class:"tree", tabindex:"0", "aria-label":"Tournament bracket"}, rounds)));
 }
 function poolTable() {
@@ -370,19 +384,25 @@ function poolTable() {
         return el("div", {class:"row table-player"}, profilePhoto(byMember(game["player" + side + "Uid"]),name),
           el("strong", {class:"fill"}, name));
       };
-      return el("div", {class:"table-game"}, player("A"), el("small", {}, "VS"), player("B"));
+      return el("div", {class:"table-game"}, player("A"), el("small", {}, "VS"), player("B"),
+        game.startedAt && el("strong", {class:"table-clock", "data-table-started-at":game.startedAt}));
     }));
 }
 function home() {
   app.append(el("h1", {}, "Your cue, your call."), poolTable());
-  if (!matchMedia("(display-mode: standalone)").matches && !navigator.standalone) {
-    app.append(card(el("h2", {}, "Add Cue Club to your iPhone"), muted("In Safari, tap Share, then Add to Home Screen and Open as Web App.")));
-  }
+  const needsAction = data.games.filter(game => own(game) && (
+    game.status === "awaiting_confirmation" && !myReport(game) ||
+    game.status === "invited" && game.playerBUid === uid));
+  const nextAction = needsAction.find(game => game.status === "awaiting_confirmation") || needsAction[0] ||
+    data.games.find(game => own(game) && game.status === "active");
+  if (nextAction) app.append(gameCard(nextAction));
+  app.append(el("div", {class:"actions"}, button("Challenge a player to 1v1", challenge, !nextAction),
+    data.isAdmin && button("Manage office league", adminPanel)));
   const tournament = data.season?.tournament;
   const next = tournament?.status === "active" && tournament.matches.find(match =>
     match.playerAUid && match.playerBUid && [match.playerAUid,match.playerBUid].includes(uid) &&
     ["pending","in_progress"].includes(match.status));
-  if (next) {
+  if (next && next.gameId !== nextAction?.id) {
     const opponentId = next.playerAUid === uid ? next.playerBUid : next.playerAUid;
     const opponent = byMember(opponentId) || {uid:opponentId,displayName:next.playerAUid === uid ? next.playerBName : next.playerAName};
     const game = byGame(next.gameId);
@@ -391,11 +411,34 @@ function home() {
       muted(gameStatus(game)), game ? gameActions(game) :
         next.status === "pending" ? button("Play match", () => invite(opponent,next.id), true) : null));
   }
-  const invitations = data.games.filter(game => own(game) && !league(game) && game.status === "invited" && game.playerBUid === uid);
+  const invitations = needsAction.filter(game => game !== nextAction && !league(game));
   if (invitations.length) app.append(el("h2", {}, "Incoming 1v1 invitations"), el("div", {}, invitations.map(gameCard)));
-  app.append(el("div", {class:"actions"}, button("Challenge a player to 1v1", challenge, true),
-    data.isAdmin && button("Manage office league", adminPanel)), notificationButton());
+  if (data.weeklyHighlights?.length) app.append(card(el("h2", {}, "This week at the table"),
+    data.weeklyHighlights.map(highlight => el("div", {class:"weekly-highlight"},
+      el("strong", {}, highlight.title), muted(highlight.detail)))));
   bracket(data.season);
+  if (!matchMedia("(display-mode: standalone)").matches && !navigator.standalone) {
+    app.append(card(el("h2", {}, "Add Cue Club to your iPhone"), muted("In Safari, tap Share, then Add to Home Screen and Open as Web App.")));
+  }
+  app.append(notificationButton());
+  updateClock();
+}
+function resultCard(match) {
+  const winner = match.winnerUid === match.playerAUid ? match.playerAName : match.playerBName;
+  const opponentId = match.playerAUid === uid ? match.playerBUid : match.playerBUid === uid ? match.playerAUid : "";
+  const opponent = byMember(opponentId);
+  const player = side => {
+    const id = match["player" + side + "Uid"], name = match["player" + side + "Name"];
+    return el("div", {class:"versus-player"}, profilePhoto(byMember(id), name),
+      el("strong", {class:id === match.winnerUid ? "champion" : null}, name));
+  };
+  return card(el("div", {class:"row between"}, el("span", {class:"pill"}, match.isLeagueMatch ? "League" : "1v1"),
+    el("small", {}, date(match.createdAt))),
+    el("div", {class:"versus-line result-pair"}, player("A"), el("small", {}, "VS"), player("B")),
+    el("div", {class:"row between"}, el("strong", {}, "Winner · " + winner),
+      match.durationSeconds != null ? el("span", {class:"table-clock"}, formatTime(match.durationSeconds)) : null),
+    match.ratingChange != null ? muted("Elo · winner +" + match.ratingChange + " / opponent −" + match.ratingChange) : null,
+    !match.isLeagueMatch && opponent && button("Rematch", () => invite(opponent)));
 }
 function results() {
   app.append(el("h1", {}, "Results"), muted(online ? "Confirmed matches from across the office." : "Showing results from your last sync."));
@@ -406,14 +449,7 @@ function results() {
     () => {filter = option; render();}, false, {"aria-pressed":String(filter === option)}))));
   const rows = data.matches.filter(match => filter === "All" || !!match.isLeagueMatch === (filter === "League"));
   app.append(muted(rows.length + " confirmed " + (rows.length === 1 ? "result" : "results")));
-  const list = el("div", {class:"cards"}, rows.map(match => {
-    const winner = match.winnerUid === match.playerAUid ? match.playerAName : match.playerBName;
-    return card(el("div", {class:"row between"}, el("span", {class:"pill"}, match.isLeagueMatch ? "League" : "1v1"),
-      el("small", {}, date(match.createdAt))), el("h3", {}, match.playerAName + " vs " + match.playerBName),
-      el("div", {class:"row between"}, el("strong", {}, "Winner · " + winner),
-        match.durationSeconds != null ? el("span", {}, formatTime(match.durationSeconds)) : null),
-      match.ratingChange != null ? muted("Elo · winner +" + match.ratingChange + " / opponent −" + match.ratingChange) : null);
-  }));
+  const list = el("div", {class:"cards"}, rows.map(resultCard));
   app.append(rows.length ? list : card(muted("No confirmed results yet.")));
 }
 function record(id) {
@@ -568,7 +604,7 @@ function applyAppearance() {
 }
 function updateConnectionLabel() {
   if (!settingsConnection?.isConnected) return;
-  settingsConnection.textContent = online ? "PC server online" : "PC server offline";
+  settingsConnection.textContent = online ? "Server online" : "Server offline";
   settingsConnection.className = online ? "pill" : "pill offline";
 }
 async function checkConnection() {
@@ -581,7 +617,7 @@ async function checkConnection() {
   updateConnectionLabel();
 }
 function settings() {
-  settingsConnection = el("p", {class:online ? "pill" : "pill offline"}, online ? "PC server online" : "PC server offline");
+  settingsConnection = el("p", {class:online ? "pill" : "pill offline"}, online ? "Server online" : "Server offline");
   const currentTheme = localStorage.getItem("cue-theme") || "dark";
   const themes = el("select", {onchange:event => {
     localStorage.setItem("cue-theme", event.target.value);

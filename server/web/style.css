@@ -54,6 +54,13 @@ dialog{width:min(92vw,30rem);max-height:80dvh;overflow:auto;color:var(--ink);bac
 .photo-button{padding:0;border:0;background:none;border-radius:50%;min-width:44px;min-height:44px;display:inline-grid;place-items:center;flex:none}
 .photo-button .avatar{width:40px;height:40px}
 .table-game{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:.5rem;padding:.65rem 0;border-top:1px solid var(--line)}
+.table-game .table-clock{grid-column:1/-1;justify-self:center}
+.table-clock{font-variant-numeric:tabular-nums;color:var(--good)}
+.champion{color:#efce80;font-weight:750}
+:root[data-theme=light] .champion{color:#765411}
+.result-pair{margin:.8rem 0;text-align:center}
+.result-pair .avatar{width:48px;height:48px}
+.weekly-highlight+.weekly-highlight{border-top:1px solid var(--line);padding-top:.6rem}
 .table-player{flex-wrap:nowrap;font-size:.9rem}.table-player strong{overflow-wrap:anywhere}
 .versus-line{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:.65rem;align-items:center;text-align:center;margin:1rem 0}
 .versus-player{display:grid;justify-items:center;gap:.45rem;overflow-wrap:anywhere;min-width:0}.versus-player .avatar{width:70px;height:70px}

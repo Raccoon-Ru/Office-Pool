@@ -43,6 +43,8 @@ public class MainActivity extends Activity {
     private TextView matchAlertsStatus;
     private TextView poolTableStatus;
     private JSONArray playingNow = new JSONArray();
+    private JSONArray weeklyHighlights = new JSONArray();
+    private final Map<TextView, String> tableClocks = new LinkedHashMap<>();
     private boolean hasTableStatus;
     private String viewedProfileUid = "";
     private int profileReturnPage = 2;
@@ -380,6 +382,7 @@ public class MainActivity extends Activity {
         matchTimerText = null;
         matchAlertsStatus = null;
         poolTableStatus = null;
+        tableClocks.clear();
         if (token.isEmpty()) {
             timerGameId = "";
             openedMatchTimers.clear();
@@ -520,12 +523,23 @@ public class MainActivity extends Activity {
                 uid.equals(game.optString("playerAUid")) ? "reportAWinnerUid" : "reportBWinnerUid";
         boolean reported = !game.optString(reportField).isEmpty();
         if (finished) {
-            content.addView(text("Winner · " + game.optString("winnerName"), 18, INK, true));
+            content.addView(text("Winner · " + game.optString("winnerName"), 18, resultGold(), true));
+            String resultId = game.optString("statsMatchId");
+            for (int i = 0; !resultId.isEmpty() && i < matches.length(); i++) {
+                JSONObject match = matches.optJSONObject(i);
+                if (match != null && resultId.equals(match.optString("id"))) {
+                    addResultRating(content, match);
+                    addRematchButton(content, match);
+                    break;
+                }
+            }
         } else if (state.equals("disputed")) {
             content.addView(text("The league admin is reviewing the result.", 14, MUTED, false));
         } else if (reported) {
+            String opponent = uid.equals(game.optString("playerAUid"))
+                    ? game.optString("playerBName") : game.optString("playerAName");
             content.addView(
-                    text("Waiting for your opponent to confirm the winner.", 14, MUTED, false));
+                    text("Waiting for " + opponent + " to confirm the winner.", 14, MUTED, false));
         } else {
             TextView result =
                     button(
@@ -574,14 +588,21 @@ public class MainActivity extends Activity {
     private void updateMatchTimer() {
         handler.removeCallbacks(timerTick);
         JSONObject game = findGame(timerGameId);
-        if (matchTimerText == null || game == null) return;
-        boolean running = isTimingMatch(game.optString("status"));
-        String finished = game.optString("finishedAt");
-        matchTimerText.setText(
-                running || !finished.isEmpty()
-                        ? elapsed(game.optString("startedAt"), finished)
-                        : "—");
-        if (foreground && running) handler.postDelayed(timerTick, 250);
+        boolean running = false;
+        if (matchTimerText != null && game != null) {
+            running = isTimingMatch(game.optString("status"));
+            String finished = game.optString("finishedAt");
+            matchTimerText.setText(
+                    running || !finished.isEmpty()
+                            ? elapsed(game.optString("startedAt"), finished)
+                            : "—");
+        }
+        for (Map.Entry<TextView, String> clock : tableClocks.entrySet()) {
+            clock.getKey().setText(elapsed(clock.getValue(), ""));
+        }
+        if (foreground && (running || !tableClocks.isEmpty())) {
+            handler.postDelayed(timerTick, 250);
+        }
     }
 
     private void leaveMatchTimer() {
@@ -839,8 +860,8 @@ public class MainActivity extends Activity {
     String errorText(Exception e) {
         String m = e.getMessage();
         if (e instanceof OfficeApi.ApiException && ((OfficeApi.ApiException) e).code == 404)
-            return "PC server address was reached, but its API was not found.";
-        return m == null || m.isEmpty() ? "Could not reach the PC server." : m;
+            return "Server reached, but the Cue Club API was not found.";
+        return m == null || m.isEmpty() ? "Could not reach the server." : m;
     }
 
     private void openMyProfile() {
@@ -907,7 +928,7 @@ public class MainActivity extends Activity {
         if (!token.isEmpty()) {
             addHomeMatchButton(
                     menu,
-                    "PC server address",
+                    "Server address",
                     () -> {
                         dialog.dismiss();
                         serverSettings();
@@ -934,7 +955,7 @@ public class MainActivity extends Activity {
         EditText address = input("https://your-pc.your-tailnet.ts.net", false);
         address.setText(serverUrl);
         new AlertDialog.Builder(this)
-                .setTitle("PC server address")
+                .setTitle("Server address")
                 .setMessage("Use the HTTPS URL shown by Tailscale Serve.")
                 .setView(address)
                 .setNegativeButton("Cancel", null)
@@ -972,6 +993,7 @@ public class MainActivity extends Activity {
         ratingHistory = new JSONArray();
         viewedProfileUid = "";
         playingNow = new JSONArray();
+        weeklyHighlights = new JSONArray();
         hasTableStatus = false;
         players.clear();
         members.clear();
@@ -1049,13 +1071,24 @@ public class MainActivity extends Activity {
                         .toUpperCase(Locale.getDefault());
         title(day, "Your cue, your call.", "A little friendly competition goes a long way.");
         renderPoolTable();
-        renderMyNextMatch();
-        renderHomeInvitations();
+        List<JSONObject> actions = homeActions();
+        JSONObject nextAction = actions.isEmpty() ? null : actions.get(0);
+        if (nextAction != null) gameCard(content, nextAction);
         TextView challenge = button("Challenge a player to 1v1");
+        if (nextAction != null) {
+            challenge.setTextColor(INK);
+            challenge.setBackground(shape(CARD, 14));
+        }
         challenge.setOnClickListener(v -> addMatch());
         LinearLayout.LayoutParams challengeLayout = lp(-1, -2);
         challengeLayout.bottomMargin = dp(10);
         content.addView(challenge, challengeLayout);
+        for (int i = 1; i < actions.size(); i++) {
+            JSONObject game = actions.get(i);
+            if (game.optString("tournamentMatchId").isEmpty()) gameCard(content, game);
+        }
+        renderMyNextMatch(nextAction == null ? "" : nextAction.optString("id"));
+        renderWeeklyHighlights();
         renderMatchAlertsStatus();
         if (isAdmin) {
             TextView admin = button("Manage office league");
@@ -1368,13 +1401,17 @@ public class MainActivity extends Activity {
                 winnerUid.isEmpty()
                         ? match.optBoolean("win")
                         : winnerUid.equals(match.optString("playerAUid"));
-        TextView players = text(a + "  vs  " + b, 16, INK, true);
+        LinearLayout players = horizontal();
+        players.setGravity(Gravity.CENTER);
+        players.addView(resultPlayer(match, "A", a, aWon), new LinearLayout.LayoutParams(0, -2, 1));
+        players.addView(text("VS", 12, MUTED, true));
+        players.addView(resultPlayer(match, "B", b, !aWon), new LinearLayout.LayoutParams(0, -2, 1));
         LinearLayout.LayoutParams playerLayout = lp(-1, -2);
         playerLayout.topMargin = dp(9);
         card.addView(players, playerLayout);
         LinearLayout footer = horizontal();
         footer.addView(
-                text("Winner · " + (aWon ? a : b), 12, tone(0xff285625, 0xffC5E7AF), true),
+                text("Winner · " + (aWon ? a : b), 12, resultGold(), true),
                 new LinearLayout.LayoutParams(0, -2, 1));
         long seconds = match.optLong("durationSeconds", -1);
         if (seconds >= 0) {
@@ -1386,11 +1423,51 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams footerLayout = lp(-1, -2);
         footerLayout.topMargin = dp(5);
         card.addView(footer, footerLayout);
+        addResultRating(card, match);
+        addRematchButton(card, match);
+    }
+
+    private int resultGold() {
+        return tone(0xff765411, 0xffEFCE80);
+    }
+
+    private LinearLayout resultPlayer(JSONObject match, String side, String name, boolean won) {
+        LinearLayout player = vertical();
+        player.setGravity(Gravity.CENTER_HORIZONTAL);
+        OfficeMember member = memberByUid(match.optString("player" + side + "Uid"));
+        FrameLayout photo = avatar(name, member);
+        linkProfilePhoto(photo, member);
+        player.addView(photo, lp(44, 44));
+        TextView label = text(name, 13, won ? resultGold() : INK, true);
+        label.setGravity(Gravity.CENTER);
+        player.addView(label, lp(-1, -2));
+        return player;
+    }
+
+    private void addResultRating(LinearLayout destination, JSONObject match) {
         int change = match.optInt("ratingChange", -1);
         if (change >= 0) {
-            card.addView(
+            destination.addView(
                     text("Elo · winner +" + change + "  /  opponent −" + change, 12, MUTED, false));
         }
+    }
+
+    private void addRematchButton(LinearLayout destination, JSONObject match) {
+        if (match.optBoolean("isLeagueMatch")) return;
+        String a = match.optString("playerAUid"), b = match.optString("playerBUid");
+        OfficeMember opponent = uid.equals(a) ? memberByUid(b) : uid.equals(b) ? memberByUid(a) : null;
+        if (opponent == null) return;
+        addHomeMatchButton(destination, "Rematch", () ->
+                new AlertDialog.Builder(this)
+                        .setTitle("Play a rematch?")
+                        .setMessage("Send a 1v1 invitation to " + opponent.name + "?")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Send invite", (dialog, which) -> {
+                            timerGameId = "";
+                            page = 1;
+                            createInvite(opponent);
+                        })
+                        .show());
     }
 
     private String resultDate(JSONObject match) {
@@ -1427,7 +1504,15 @@ public class MainActivity extends Activity {
             LinearLayout.LayoutParams position = lp(-1, -2);
             position.topMargin = dp(10);
             table.addView(players, position);
+            String started = game.optString("startedAt");
+            if (!started.isEmpty()) {
+                TextView clock = text("", 13, tone(0xff285625, GREEN), true);
+                clock.setGravity(Gravity.CENTER);
+                table.addView(clock, lp(-1, -2));
+                tableClocks.put(clock, started);
+            }
         }
+        updateMatchTimer();
     }
 
     private void updatePoolTableStatus() {
@@ -1444,7 +1529,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void renderMyNextMatch() {
+    private void renderMyNextMatch(String featuredGameId) {
         JSONObject tournament = seasonData.optJSONObject("tournament");
         if (tournament == null || !"active".equals(tournament.optString("status"))) return;
         JSONArray bracket = tournament.optJSONArray("matches");
@@ -1456,6 +1541,9 @@ public class MainActivity extends Activity {
             if (a.isEmpty() || b.isEmpty() || (!uid.equals(a) && !uid.equals(b))) continue;
             String state = match.optString("status");
             if (!state.equals("pending") && !state.equals("in_progress")) continue;
+            if (!featuredGameId.isEmpty() && featuredGameId.equals(match.optString("gameId"))) {
+                return;
+            }
             boolean opponentIsB = uid.equals(a);
             String opponentId = opponentIsB ? b : a;
             String opponentName = bracketPlayer(match, opponentIsB ? "playerBName" : "playerAName");
@@ -1511,19 +1599,40 @@ public class MainActivity extends Activity {
         control.setOnClickListener(v -> action.run());
     }
 
-    private void renderHomeInvitations() {
-        boolean headingAdded = false;
+    private List<JSONObject> homeActions() {
+        ArrayList<JSONObject> invitations = new ArrayList<>();
+        ArrayList<JSONObject> confirmations = new ArrayList<>();
+        JSONObject active = null;
         for (int i = 0; i < games.length(); i++) {
             JSONObject game = games.optJSONObject(i);
-            if (game == null
-                    || !"invited".equals(game.optString("status"))
-                    || !uid.equals(game.optString("playerBUid"))
-                    || !game.optString("tournamentMatchId").isEmpty()) continue;
-            if (!headingAdded) {
-                content.addView(lineLabel("INCOMING 1V1 INVITATIONS"));
-                headingAdded = true;
+            if (game == null) continue;
+            String state = game.optString("status");
+            if (state.equals("invited") && uid.equals(game.optString("playerBUid"))) {
+                invitations.add(game);
+            } else if (state.equals("awaiting_confirmation") && isOwnStartedGame(game)) {
+                String reportKey = uid.equals(game.optString("playerAUid"))
+                        ? "reportAWinnerUid" : "reportBWinnerUid";
+                if (game.optString(reportKey).isEmpty()) confirmations.add(game);
+            } else if (state.equals("active") && isOwnStartedGame(game)) {
+                active = game;
             }
-            gameCard(content, game);
+        }
+        confirmations.addAll(invitations);
+        if (confirmations.isEmpty() && active != null) confirmations.add(active);
+        return confirmations;
+    }
+
+    private void renderWeeklyHighlights() {
+        if (weeklyHighlights.length() == 0) return;
+        LinearLayout panel = card();
+        panel.addView(text("This week at the table", 17, INK, true));
+        for (int i = 0; i < weeklyHighlights.length(); i++) {
+            JSONObject highlight = weeklyHighlights.optJSONObject(i);
+            if (highlight == null) continue;
+            LinearLayout.LayoutParams spacing = lp(-1, -2);
+            spacing.topMargin = dp(8);
+            panel.addView(text(highlight.optString("title"), 14, INK, true), spacing);
+            panel.addView(text(highlight.optString("detail"), 13, MUTED, false));
         }
     }
 
@@ -1586,9 +1695,9 @@ public class MainActivity extends Activity {
                         : state.equals("cancelled")
                                 ? "League closed"
                                 : deadline > 0
-                                        ? "Ends " + leagueDate(deadline - 1)
+                                        ? "Deadline · " + leagueDate(deadline - 1)
                                         : "Single elimination · winners advance";
-        summary.addView(text(detail, 13, MUTED, false));
+        summary.addView(text(detail, 13, state.equals("completed") ? resultGold() : MUTED, false));
 
         JSONArray matches = tournament.optJSONArray("matches");
         if (matches == null || matches.length() == 0) return;
@@ -1600,6 +1709,7 @@ public class MainActivity extends Activity {
         }
 
         HorizontalScrollView scroll = new HorizontalScrollView(this);
+        String myMatchId = tournament.optString("myMatchId");
         scroll.setHorizontalScrollBarEnabled(rounds > 1);
         FrameLayout tree = new FrameLayout(this);
         int column = dp(206);
@@ -1659,7 +1769,7 @@ public class MainActivity extends Activity {
             String playerB = match.optString("playerBUid");
             String winner = match.optString("winnerUid");
             boolean yours = uid.equals(playerA) || uid.equals(playerB);
-            boolean highlighted = yours && state.equals("active");
+            boolean highlighted = match.optBoolean("onMyRoute") || yours && state.equals("active");
             GradientDrawable background =
                     shape(
                             highlighted
@@ -1686,6 +1796,8 @@ public class MainActivity extends Activity {
             String matchStatus = match.optString("status");
             boolean readyToPlay =
                     highlighted
+                            && yours
+                            && state.equals("active")
                             && matchStatus.equals("pending")
                             && !playerA.isEmpty()
                             && !playerB.isEmpty();
@@ -1720,6 +1832,16 @@ public class MainActivity extends Activity {
             tile.addView(status, statusLayout);
             tile.setOnClickListener(v -> openBracketMatch(match, state, yours));
             tree.addView(tile, position);
+            if (!myMatchId.isEmpty() && myMatchId.equals(match.optString("id"))) {
+                addHomeMatchButton(summary, "Jump to my match", () -> {
+                    Rect bounds = new Rect();
+                    tile.getDrawingRect(bounds);
+                    bodyScroll.offsetDescendantRectToMyCoords(tile, bounds);
+                    bodyScroll.smoothScrollTo(0, Math.max(0, bounds.top - dp(16)));
+                    scroll.smoothScrollTo(Math.max(
+                            0, tile.getLeft() - (scroll.getWidth() - tile.getWidth()) / 2), 0);
+                });
+            }
         }
         scroll.addView(tree, new FrameLayout.LayoutParams(width, height));
         summary.addView(scroll, lp(-1, -2));
@@ -1880,16 +2002,13 @@ public class MainActivity extends Activity {
             else detail = "Waiting for " + b + " to accept";
         } else if (state.equals("active")) detail = "Match in progress";
         else if (state.equals("awaiting_confirmation")) {
-            String myReport =
-                    uid.equals(g.optString("playerAUid"))
-                            ? g.optString("reportAWinnerUid")
-                            : g.optString("reportBWinnerUid");
+            boolean playerA = uid.equals(g.optString("playerAUid"));
+            String myReport = g.optString(playerA ? "reportAWinnerUid" : "reportBWinnerUid");
+            String opponent = playerA ? b : a;
             detail =
                     myReport.isEmpty()
-                            ? "Opponent reported "
-                                    + g.optString("winnerName", "a winner")
-                                    + " · confirm or dispute"
-                            : "Waiting for your opponent to confirm the result";
+                            ? opponent + " reported a winner · your confirmation is needed"
+                            : "Waiting for " + opponent + " to confirm the result";
         } else if (state.equals("disputed"))
             detail =
                     isAdmin
@@ -1905,19 +2024,19 @@ public class MainActivity extends Activity {
         if ((state.equals("active") || state.equals("awaiting_confirmation"))
                 && (uid.equals(g.optString("playerAUid"))
                         || uid.equals(g.optString("playerBUid")))) {
-            TextView result =
-                    button(
-                            state.equals("active")
-                                    ? "Open match timer"
-                                    : "Confirm or dispute result");
+            String reportKey = uid.equals(g.optString("playerAUid"))
+                    ? "reportAWinnerUid" : "reportBWinnerUid";
+            boolean needsConfirmation = state.equals("awaiting_confirmation")
+                    && g.optString(reportKey).isEmpty();
+            TextView result = button(needsConfirmation ? "Confirm or dispute result" : "Open match timer");
             LinearLayout.LayoutParams rp = lp(-1, -2);
             rp.topMargin = dp(10);
             c.addView(result, rp);
             result.setOnClickListener(
                     v -> {
                         closeMatchDialog.run();
-                        if (state.equals("active") && isOwnStartedGame(g)) openMatchTimer(g);
-                        else reportWinnerDialog(g);
+                        if (needsConfirmation) reportWinnerDialog(g);
+                        else if (isOwnStartedGame(g)) openMatchTimer(g);
                     });
         }
         if (state.equals("disputed") && isAdmin) {
@@ -2916,6 +3035,8 @@ public class MainActivity extends Activity {
                 + "|"
                 + playingNow.toString()
                 + "|"
+                + weeklyHighlights.toString()
+                + "|"
                 + isAdmin;
     }
 
@@ -3012,6 +3133,8 @@ public class MainActivity extends Activity {
         JSONArray playing = snap.optJSONArray("playingNow");
         hasTableStatus = playing != null;
         playingNow = playing == null ? new JSONArray() : playing;
+        JSONArray highlights = snap.optJSONArray("weeklyHighlights");
+        weeklyHighlights = highlights == null ? new JSONArray() : highlights;
         JSONArray history = snap.optJSONArray("ratingHistory");
         if (history != null) ratingHistory = history;
         JSONArray remoteGames = snap.optJSONArray("games");

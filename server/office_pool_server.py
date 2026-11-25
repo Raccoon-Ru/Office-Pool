@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -316,6 +317,82 @@ def scorebook_ratings(
     return ratings, changes, history
 
 
+def weekly_highlights(members, matches, rating_changes, now):
+    office_timezone = timezone(timedelta(hours=2))
+    office_date = now.astimezone(office_timezone).date()
+    monday = office_date - timedelta(days=office_date.weekday())
+    names = {member["uid"]: member["display_name"] for member in members}
+    gains, streaks = Counter(), Counter()
+    upset, longest = None, ("", 1)
+    for match in reversed(matches):
+        change = rating_changes.get(match["id"])
+        if change is None:
+            continue
+        try:
+            played = datetime.fromisoformat(match["created_at"])
+        except (TypeError, ValueError):
+            continue
+        if played.tzinfo is None:
+            played = played.replace(tzinfo=timezone.utc)
+        if not monday <= played.astimezone(office_timezone).date() <= office_date:
+            continue
+        winner = match["winner_uid"]
+        loser = (
+            match["player_b_uid"]
+            if winner == match["player_a_uid"]
+            else match["player_a_uid"]
+        )
+        gains[winner] += change
+        gains[loser] -= change
+        streaks[winner] += 1
+        streaks[loser] = 0
+        if streaks[winner] > longest[1]:
+            longest = winner, streaks[winner]
+        if change > ELO_K / 2 and (upset is None or change > upset[2]):
+            upset = winner, loser, change
+
+    highlights = []
+    if upset:
+        winner, loser, points = upset
+        highlights.append(
+            {"title": "Biggest upset", "detail": f"{names[winner]} beat {names[loser]} · +{points} Elo"}
+        )
+    if longest[0]:
+        player, wins = longest
+        highlights.append(
+            {"title": "Longest win streak", "detail": f"{names[player]} · {wins} wins in a row"}
+        )
+    if len(highlights) < 2 and gains:
+        player, points = gains.most_common(1)[0]
+        if points > 0:
+            highlights.append(
+                {"title": "Most improved", "detail": f"{names[player]} · +{points} Elo this week"}
+            )
+    return highlights
+
+
+def add_player_bracket_route(tournament, uid):
+    matches = tournament["matches"]
+    first = next(
+        (match for match in matches if uid in (match["playerAUid"], match["playerBUid"])),
+        None,
+    )
+    if first is None:
+        return
+    slot = first["slot"]
+    round_no = first["round"]
+    for match in matches:
+        if match["round"] != round_no or match["slot"] != slot:
+            continue
+        match["onMyRoute"] = True
+        if tournament["status"] == "active" and match["status"] in ("pending", "in_progress"):
+            tournament["myMatchId"] = match["id"]
+        if match["winnerUid"] and match["winnerUid"] != uid:
+            break
+        round_no += 1
+        slot //= 2
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "OfficePool/1.0"
 
@@ -485,6 +562,7 @@ class Handler(BaseHTTPRequestHandler):
                             season["tournament"]["championName"] = champion[
                                 "display_name"
                             ]
+                    add_player_bracket_route(season["tournament"], uid)
             game_query = """SELECT g.*, a.display_name AS player_a_name, b.display_name AS player_b_name,
                                   w.display_name AS winner_name
                            FROM games g
@@ -530,6 +608,7 @@ class Handler(BaseHTTPRequestHandler):
                 "winnerUid": row["winner_uid"],
                 "winnerName": row["winner_name"] or "",
                 "finishedAt": row["finished_at"],
+                "statsMatchId": row["stats_match_id"],
             }
             for row in game_rows
         ]
@@ -545,6 +624,9 @@ class Handler(BaseHTTPRequestHandler):
                 match_json(match, rating_changes.get(match["id"])) for match in matches
             ],
             "games": games,
+            "weeklyHighlights": weekly_highlights(
+                members, matches, rating_changes, datetime.now(timezone.utc)
+            ),
             "ratingHistory": rating_history.get(uid, [ELO_START]),
             "playingNow": [
                 {
