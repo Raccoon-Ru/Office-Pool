@@ -32,8 +32,10 @@ public class MainActivity extends Activity {
     static final String WORK_DOMAIN = "@acumensoft.net";
     static final String PREFERENCES_NAME = "MainActivity";
     static final int PICK_PHOTO = 4102;
-    private static final int MAX_PHOTO_MB = 12;
+    private static final int MAX_PHOTO_MB = 15;
     private static final long MAX_PHOTO_BYTES = MAX_PHOTO_MB * 1024L * 1024L;
+    private static final int PROFILE_PHOTO_EDGE = 512;
+    private static final int PROFILE_PHOTO_QUALITY = 85;
     private static final String PHOTO_LIMIT_MESSAGE =
             "Choose a photo of " + MAX_PHOTO_MB + " MB or less.";
     static final int NOTIFICATION_PERMISSION_REQUEST = 5201;
@@ -3193,11 +3195,11 @@ public class MainActivity extends Activity {
         private final EditText name = input("Display name", false);
         private final TextView message = text("", 12, MUTED, false);
         private final TextView saveButton = button("Save changes");
+        private final TextView choose = secondaryProfileButton("Change photo");
         private final FrameLayout preview = avatar(currentName(), memberByUid(uid));
         private final ImageView selectedPreview = new ImageView(MainActivity.this);
         private final String owner = uid;
         private File photo;
-        private String mime;
 
         void show() {
             dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -3217,11 +3219,11 @@ public class MainActivity extends Activity {
             portrait.addView(preview, lp(76, 76));
             LinearLayout photoControls = vertical();
             pad(photoControls, 14, 0, 0, 0);
-            TextView choose = secondaryProfileButton("Change photo");
             choose.setOnClickListener(view -> pickPhoto());
             photoControls.addView(choose, lp(-2, -2));
             photoControls.addView(spacer(4));
-            photoControls.addView(text("JPEG, PNG or WebP · up to 12 MB", 11, MUTED, false));
+            photoControls.addView(text(
+                    "JPEG, PNG or WebP · up to " + MAX_PHOTO_MB + " MB", 11, MUTED, false));
             portrait.addView(photoControls, new LinearLayout.LayoutParams(0, -2, 1));
             panel.addView(portrait);
             panel.addView(spacer(20));
@@ -3275,6 +3277,7 @@ public class MainActivity extends Activity {
                 return;
             }
             saveButton.setEnabled(false);
+            choose.setEnabled(false);
             status("Preparing photo…", false);
             io.execute(() -> {
                 File file = null;
@@ -3290,10 +3293,10 @@ public class MainActivity extends Activity {
                         }
                         if (photo != null) photo.delete();
                         photo = selected;
-                        mime = type;
                         selectedPreview.setImageBitmap(bitmap);
                         selectedPreview.setVisibility(View.VISIBLE);
                         saveButton.setEnabled(true);
+                        choose.setEnabled(true);
                         status("Photo ready to save.", false);
                     });
                 } catch (Exception error) {
@@ -3301,6 +3304,7 @@ public class MainActivity extends Activity {
                     runOnUiThread(() -> {
                         if (profileEditor != this) return;
                         saveButton.setEnabled(true);
+                        choose.setEnabled(true);
                         status(errorText(error), true);
                     });
                 }
@@ -3328,7 +3332,7 @@ public class MainActivity extends Activity {
             if (photoChanged) {
                 File previous = pendingPhoto(owner);
                 prefs.edit().putBoolean("pendingPhoto", true)
-                        .putString("pendingPhotoMime", mime)
+                        .putString("pendingPhotoMime", "image/jpeg")
                         .putString("pendingPhotoOwner", owner)
                         .putString("pendingPhotoFile", photo.getName()).apply();
                 photo = null;
@@ -3394,8 +3398,7 @@ public class MainActivity extends Activity {
     }
 
     private File readProfilePhoto(Uri uri, String mime) throws IOException {
-        File file = File.createTempFile("pending-photo-", ".image", getFilesDir());
-        boolean valid = false;
+        File file = File.createTempFile("photo-source-", ".image", getCacheDir());
         try {
             try (InputStream in = getContentResolver().openInputStream(uri);
                     OutputStream out = new FileOutputStream(file)) {
@@ -3411,10 +3414,76 @@ public class MainActivity extends Activity {
             if (!mime.equals(bounds.outMimeType)) {
                 throw new IOException("Choose a valid " + mime.substring(6).toUpperCase(Locale.ROOT) + " photo.");
             }
-            valid = true;
+            return writeProfilePhoto(decodeProfilePhoto(file, bounds));
+        } finally {
+            file.delete();
+        }
+    }
+
+    private Bitmap decodeProfilePhoto(File file, BitmapFactory.Options bounds) throws IOException {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            return ImageDecoder.decodeBitmap(ImageDecoder.createSource(file), (decoder, info, source) -> {
+                int width = info.getSize().getWidth();
+                int height = info.getSize().getHeight();
+                float scale = Math.min(1f, (float) PROFILE_PHOTO_EDGE / Math.max(width, height));
+                decoder.setTargetSize(Math.max(1, Math.round(width * scale)),
+                        Math.max(1, Math.round(height * scale)));
+                decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+            });
+        }
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = 1;
+        while (Math.max(bounds.outWidth, bounds.outHeight) / (2 * options.inSampleSize)
+                >= PROFILE_PHOTO_EDGE) {
+            options.inSampleSize *= 2;
+        }
+        Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+        if (bitmap == null) throw new IOException("Could not read this photo.");
+        if (!"image/jpeg".equals(bounds.outMimeType)) return bitmap;
+        android.media.ExifInterface exif = new android.media.ExifInterface(file.getAbsolutePath());
+        int orientation = exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1);
+        Matrix transform = new Matrix();
+        switch (orientation) {
+            case 2: transform.setScale(-1, 1); break;
+            case 3: transform.setRotate(180); break;
+            case 4: transform.setScale(1, -1); break;
+            case 5: transform.setRotate(90); transform.postScale(-1, 1); break;
+            case 6: transform.setRotate(90); break;
+            case 7: transform.setRotate(-90); transform.postScale(-1, 1); break;
+            case 8: transform.setRotate(-90); break;
+            default: return bitmap;
+        }
+        Bitmap rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(),
+                transform, true);
+        if (rotated != bitmap) bitmap.recycle();
+        return rotated;
+    }
+
+    private File writeProfilePhoto(Bitmap photo) throws IOException {
+        float scale = Math.min(1f, (float) PROFILE_PHOTO_EDGE
+                / Math.max(photo.getWidth(), photo.getHeight()));
+        int width = Math.max(1, Math.round(photo.getWidth() * scale));
+        int height = Math.max(1, Math.round(photo.getHeight() * scale));
+        Bitmap flattened = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(flattened);
+        canvas.drawColor(Color.WHITE);
+        canvas.drawBitmap(photo, null, new Rect(0, 0, width, height),
+                new Paint(Paint.FILTER_BITMAP_FLAG));
+        photo.recycle();
+        File file = null;
+        boolean written = false;
+        try {
+            file = File.createTempFile("pending-photo-", ".image", getFilesDir());
+            try (OutputStream out = new FileOutputStream(file)) {
+                if (!flattened.compress(Bitmap.CompressFormat.JPEG, PROFILE_PHOTO_QUALITY, out)) {
+                    throw new IOException("Could not prepare this photo.");
+                }
+            }
+            written = true;
             return file;
         } finally {
-            if (!valid) file.delete();
+            flattened.recycle();
+            if (!written && file != null) file.delete();
         }
     }
 

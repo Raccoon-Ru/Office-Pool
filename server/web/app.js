@@ -682,10 +682,37 @@ function ratingChart(points) {
   requestAnimationFrame(draw);
   return canvas;
 }
+const PROFILE_PHOTO_MAX_MB = 15;
+const PROFILE_PHOTO_EDGE = 512;
+const PROFILE_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
+
+async function prepareProfilePhoto(file) {
+  const source = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = source;
+    await image.decode();
+    const scale = Math.min(1, PROFILE_PHOTO_EDGE / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = el("canvas", {
+      width:Math.max(1, Math.round(image.naturalWidth * scale)),
+      height:Math.max(1, Math.round(image.naturalHeight * scale))
+    });
+    const context = canvas.getContext("2d", {alpha:false});
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const prepared = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", 0.85));
+    if (prepared?.type !== "image/jpeg") throw new Error("Could not prepare this photo.");
+    return prepared;
+  } finally {
+    URL.revokeObjectURL(source);
+  }
+}
+
 function editProfile() {
   const person = self();
   const [nameField,name] = field("Display name", {value:person?.displayName || "", maxlength:48, required:true});
-  const photo = el("input", {type:"file", accept:"image/jpeg,image/png,image/webp", hidden:true});
+  const photo = el("input", {type:"file", accept:PROFILE_PHOTO_TYPES.join(","), hidden:true});
   const draft = el("img", {class:"draft-avatar", alt:"", hidden:true});
   const preview = el("div", {class:"profile-editor-avatar"}, avatar(person), draft);
   const feedback = el("p", {class:"profile-editor-feedback", role:"status", hidden:true});
@@ -695,19 +722,30 @@ function editProfile() {
     feedback.classList.toggle("offline", error);
     feedback.hidden = false;
   }
-  photo.addEventListener("change", () => {
+  photo.addEventListener("change", async () => {
     const candidate = photo.files[0];
+    photo.value = "";
     if (!candidate) return;
-    if (!["image/jpeg","image/png","image/webp"].includes(candidate.type) || candidate.size > 12*1024*1024) {
-      showFeedback("Choose a JPEG, PNG, or WebP photo of 12 MB or less.", true);
+    if (!PROFILE_PHOTO_TYPES.includes(candidate.type) || candidate.size > PROFILE_PHOTO_MAX_MB * 1024 * 1024) {
+      showFeedback("Choose a JPEG, PNG, or WebP photo of " + PROFILE_PHOTO_MAX_MB + " MB or less.", true);
       return;
     }
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    selected = candidate;
-    previewUrl = URL.createObjectURL(candidate);
-    draft.src = previewUrl;
-    draft.hidden = false;
-    showFeedback("Photo ready to save.");
+    save.disabled = choose.disabled = true;
+    showFeedback("Preparing photo…");
+    try {
+      const prepared = await prepareProfilePhoto(candidate);
+      if (!dialog.open) return;
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      selected = prepared;
+      previewUrl = URL.createObjectURL(prepared);
+      draft.src = previewUrl;
+      draft.hidden = false;
+      showFeedback("Photo ready to save.");
+    } catch {
+      if (dialog.open) showFeedback("Could not read or prepare this photo.", true);
+    } finally {
+      save.disabled = choose.disabled = false;
+    }
   });
   const choose = button("Change photo", () => photo.click());
   const cancel = button("Cancel", () => dialog.close());
@@ -729,7 +767,7 @@ function editProfile() {
     }
   }},
     el("div", {class:"profile-editor-photo"}, preview,
-      el("div", {}, choose, el("small", {}, "JPEG, PNG or WebP · up to 12 MB"))),
+      el("div", {}, choose, el("small", {}, "JPEG, PNG or WebP · up to " + PROFILE_PHOTO_MAX_MB + " MB"))),
     photo, nameField, feedback, el("div", {class:"profile-editor-footer"}, cancel, save));
   const dialog = el("dialog", {class:"profile-editor","aria-labelledby":"edit-profile-title"}, title, form);
   dialog.addEventListener("close", () => {

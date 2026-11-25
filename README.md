@@ -1,6 +1,6 @@
 # Cue Club (Office Pool)
 
-A native Android pool league tracker for the Acumensoft office. The app has five main screens: Home, Results, Players, Table, and Profile. Profiles and confirmed results sync through the office PC server. The app keeps working offline and queues changes for sync when the server is reachable again. Profile photos can be JPEG, PNG, or WebP and up to 12 MB.
+A native Android pool league tracker for the Acumensoft office. The app has five main screens: Home, Results, Players, Table, and Profile. Profiles and confirmed results sync through the office PC server. The app keeps working offline and queues changes for sync when the server is reachable again. Profile photos can be JPEG, PNG, or WebP and up to 15 MB. The app resizes them to at most 512 pixels on the longest edge and compresses them as JPEG before uploading.
 
 Tap your name or photo at the top right of Home to open **My profile**. It shows your Elo, personal best, rating progression, recent form, and match stats. **Settings** sits at the top right of My profile and contains the connection status, theme, and sign-out controls. Tap a coworker’s photo on Players or on the Home table card to see their rating and match stats. Dark is the default, and your preferred theme is saved on that device.
 
