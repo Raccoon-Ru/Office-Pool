@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Private, PC-hosted Cue Club API and Home Screen app."""
+"""Private Cue Club API and Home Screen app."""
 from __future__ import annotations
 
 import hashlib
@@ -50,6 +50,8 @@ ANDROID_RELEASES = HERE / "releases"
 ANDROID_APK = ANDROID_RELEASES / "cue-club.apk"
 ANDROID_MANIFEST = ANDROID_RELEASES / "android.json"
 ANDROID_APK_PATH = "/updates/android/cue-club.apk"
+ACCOUNT_DELETION_PATH = "/profiles/me/account-deletion"
+ACCOUNT_DELETION_REQUESTS_PATH = "/admin/account-deletion-requests"
 
 ON_RENDER = os.environ.get("RENDER", "").lower() == "true"
 HOST = os.environ.get("OFFICE_POOL_HOST", "0.0.0.0" if ON_RENDER else "127.0.0.1")
@@ -131,6 +133,10 @@ SCHEMA = """
                 token_hash TEXT PRIMARY KEY,
                 uid TEXT NOT NULL REFERENCES members(uid) ON DELETE CASCADE,
                 created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS account_deletion_requests (
+                uid TEXT PRIMARY KEY REFERENCES members(uid) ON DELETE CASCADE,
+                requested_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS matches (
                 id TEXT PRIMARY KEY,
@@ -723,7 +729,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             if push_delivery.webpush is None:
                 self.send_json(
-                    503, {"error": "Match alerts are unavailable on the office PC."}
+                    503, {"error": "Match alerts are unavailable on the server."}
                 )
                 return
             endpoint, encryption = push_delivery.subscription(data)
@@ -764,13 +770,23 @@ class Handler(BaseHTTPRequestHandler):
                     return
             self.send_json(200, {"online": True, "serverTime": now_iso()})
             return
+        if path == ACCOUNT_DELETION_REQUESTS_PATH:
+            self.list_account_deletion_requests()
+            return
         uid, ok = self.require_user()
         if not ok:
+            return
+        if path == ACCOUNT_DELETION_PATH:
+            with DB_LOCK, connect_db() as db:
+                request = db.execute(
+                    "SELECT requested_at FROM account_deletion_requests WHERE uid=?", (uid,)
+                ).fetchone()
+            self.send_json(200, {"requestedAt": request["requested_at"] if request else None})
             return
         if path == "/web-push/key" and WEB_APP_ENABLED:
             if push_delivery.webpush is None:
                 self.send_json(
-                    503, {"error": "Match alerts are unavailable on the office PC."}
+                    503, {"error": "Match alerts are unavailable on the server."}
                 )
                 return
             with DB_LOCK, connect_db() as db:
@@ -826,6 +842,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/auth/register": self.register,
                 "/auth/login": self.login,
                 "/auth/logout": self.logout,
+                ACCOUNT_DELETION_PATH: self.request_account_deletion,
                 "/sync": self.sync_pending,
                 "/admin/seasons": self.admin_start_season,
                 "/games/invite": self.create_game_invite,
@@ -957,6 +974,49 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 db.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash,))
         self.send_json(200, {"ok": True})
+
+    def request_account_deletion(self) -> None:
+        uid, ok = self.require_user()
+        if not ok:
+            return
+        password = self.read_json().get("password")
+        if not isinstance(password, str) or not password:
+            raise ValueError("Enter your current password.")
+        with DB_LOCK, connect_db() as db:
+            member = db.execute(
+                "SELECT password_salt,password_hash FROM members WHERE uid=?", (uid,)
+            ).fetchone()
+            if member is None:
+                self.send_json(401, {"error": "Sign in again to continue."})
+                return
+            _, digest = password_hash(password, bytes.fromhex(member["password_salt"]))
+            if not hmac.compare_digest(digest, member["password_hash"]):
+                self.send_json(400, {"error": "Current password is incorrect."})
+                return
+            db.execute(
+                """INSERT INTO account_deletion_requests(uid,requested_at) VALUES(?,?)
+                   ON CONFLICT(uid) DO NOTHING""",
+                (uid, now_iso()),
+            )
+            request = db.execute(
+                "SELECT requested_at FROM account_deletion_requests WHERE uid=?", (uid,)
+            ).fetchone()
+        self.send_json(200, {"requestedAt": request["requested_at"]})
+
+    def list_account_deletion_requests(self) -> None:
+        _, ok = self.require_admin()
+        if not ok:
+            return
+        with DB_LOCK, connect_db() as db:
+            requests = db.execute(
+                """SELECT m.display_name,m.email,r.requested_at
+                   FROM account_deletion_requests r JOIN members m ON m.uid=r.uid
+                   ORDER BY r.requested_at,m.uid"""
+            ).fetchall()
+        self.send_json(200, {"requests": [
+            {"name": row["display_name"], "email": row["email"], "requestedAt": row["requested_at"]}
+            for row in requests
+        ]})
 
     def sync_pending(self) -> None:
         uid, ok = self.require_user()

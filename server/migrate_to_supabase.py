@@ -13,6 +13,7 @@ from . import database, office_pool_server as server
 TABLES = (
     "members",
     "sessions",
+    "account_deletion_requests",
     "matches",
     "seasons",
     "tournaments",
@@ -44,7 +45,14 @@ def import_backup(archive: Path):
                         "The cloud database already contains Cue Club data. Import cancelled."
                     )
             counts = {}
+            source_tables = {
+                row["name"]
+                for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
             for table in TABLES:
+                if table == "account_deletion_requests" and table not in source_tables:
+                    counts[table] = 0
+                    continue
                 # Insertion order is the tiebreaker for Elo when result timestamps match.
                 order = " ORDER BY rowid" if table in ORDERED else ""
                 rows = source.execute(f"SELECT * FROM {table}{order}")

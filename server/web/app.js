@@ -7,6 +7,7 @@ const loadedVersion = document.querySelector('meta[name="cue-club-version"]')?.c
 const UPDATE_CHECK_INTERVAL_MS = 60_000;
 let nextUpdateCheck = 0;
 const base = "/cue-club/";
+const accountDeletionPath = "/profiles/me/account-deletion";
 const tabs = ["Home", "Results", "Players", "Table", "Profile"];
 let token = localStorage.getItem("cue-token") || "", uid = localStorage.getItem("cue-uid") || "";
 let data = null, online = false, page = "Home", filter = "All", signingUp = false;
@@ -131,7 +132,7 @@ async function change(path, body, success, method = "POST") {
     if (success) toast(success);
     return true;
   } catch (error) {
-    toast(error.message || "Could not reach the office PC.");
+    toast(error.message || "Could not reach the server.");
     return false;
   } finally { writing = false; }
 }
@@ -594,7 +595,7 @@ async function logout() {
       } finally { await subscription.unsubscribe(); }
     }
     await api("/auth/logout", "POST", {});
-  } catch { /* Local sign-out is still available when the PC is offline. */ }
+  } catch { /* Local sign-out is still available when the server is offline. */ }
   clearSession();
 }
 const systemAppearance = matchMedia("(prefers-color-scheme: dark)");
@@ -616,6 +617,49 @@ async function checkConnection() {
   }
   updateConnectionLabel();
 }
+function accountDeletion() {
+  const [passwordField, password] = field("Current password", {
+    type:"password", autocomplete:"current-password", required:true
+  });
+  const message = el("p", {role:"status"}, "Checking request status…");
+  const submit = button("Request deletion", async () => {
+    if (!password.reportValidity()) return;
+    submit.disabled = true;
+    try {
+      await api(accountDeletionPath, "POST", {password:password.value});
+      showPending();
+    } catch (error) {
+      message.textContent = error.message;
+      submit.disabled = false;
+    } finally {
+      password.value = "";
+    }
+  }, false, {disabled:true});
+  passwordField.hidden = true;
+  submit.hidden = true;
+  function showPending() {
+    message.textContent = "Your deletion request is pending with the office administrator.";
+    passwordField.hidden = true;
+    submit.hidden = true;
+  }
+  prompt("Delete account", message, passwordField, submit);
+  api(accountDeletionPath).then(({requestedAt}) => {
+    if (requestedAt) { showPending(); return; }
+    message.textContent = "Request permanent deletion of your Cue Club account. The office administrator will receive your request.";
+    passwordField.hidden = false;
+    submit.hidden = false;
+    submit.disabled = false;
+  }).catch(error => { message.textContent = error.message; });
+}
+function accountDeletionRequests() {
+  const list = el("div", {role:"status"}, muted("Loading requests…"));
+  prompt("Account deletion requests", list);
+  api("/admin/account-deletion-requests").then(({requests}) => {
+    list.replaceChildren(...(requests.length ? requests.map(request =>
+      el("p", {}, el("strong", {}, request.name), el("br"), request.email, el("br"),
+        date(request.requestedAt))) : [muted("No pending requests.")]));
+  }).catch(error => { list.textContent = error.message; });
+}
 function settings() {
   settingsConnection = el("p", {class:online ? "pill" : "pill offline"}, online ? "Server online" : "Server offline");
   const currentTheme = localStorage.getItem("cue-theme") || "dark";
@@ -629,6 +673,11 @@ function settings() {
     el("div", {class:"actions"},
       token && button("My profile", () => { dialog.close(); viewedProfile = ""; page = "Profile"; timerId = ""; render(); }, true),
       button("Check connection", checkConnection),
+      token && button("Delete account", () => { dialog.close(); accountDeletion(); }),
+      token && data?.isAdmin && button("Account deletion requests", () => {
+        dialog.close();
+        accountDeletionRequests();
+      }),
       token && button("Sign out", () => {
         dialog.close();
         const confirm = prompt("Sign out?", muted("You can sign in again with your office account."),
@@ -654,7 +703,7 @@ function render(preserve = false) {
     button(tab, () => { page = tab; viewedProfile = ""; render(); }, false, {"aria-current":tab === page ? "page" : null}))) : "");
   app.replaceChildren();
   if (!token) signInScreen();
-  else if (!data) app.append(el("h1", {}, "Cue Club"), muted("Connecting to the office PC…"), button("Retry", sync));
+  else if (!data) app.append(el("h1", {}, "Cue Club"), muted("Connecting to the server…"), button("Retry", sync));
   else if (timerId && byGame(timerId)) timerScreen(byGame(timerId));
   else ({Home:home,Results:results,Players:players,Table:table,Profile:profile}[page] || home)();
   if (horizontal) {
@@ -695,7 +744,7 @@ function notificationButton() {
       let subscription = await registration.pushManager.getSubscription();
       if (!subscription) {
         const applicationServerKey = await loadPushKey();
-        if (!applicationServerKey) throw new Error("Match alerts are unavailable on the office PC.");
+        if (!applicationServerKey) throw new Error("Match alerts are unavailable on the server.");
         subscription = await registration.pushManager.subscribe({userVisibleOnly:true, applicationServerKey});
       }
       await api("/web-push/subscribe", "POST", subscription.toJSON());

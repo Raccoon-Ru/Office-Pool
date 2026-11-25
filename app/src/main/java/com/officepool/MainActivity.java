@@ -27,6 +27,7 @@ public class MainActivity extends Activity {
     private static final String DEFAULT_SERVER_URL = BuildConfig.CUE_CLUB_SERVER_URL;
     private static final String FORMER_SERVER_URL = "https://acumen-ruan2024.tail49ffe5.ts.net";
     private static final String ANDROID_UPDATE_PATH = "/updates/android";
+    private static final String ACCOUNT_DELETION_PATH = "/profiles/me/account-deletion";
     private static final long UPDATE_RETRY_MS = 60_000;
     private static final long UPDATE_CHECK_INTERVAL_MS = 15 * 60_000;
     static final String WORK_DOMAIN = "@acumensoft.net";
@@ -945,9 +946,123 @@ public class MainActivity extends Activity {
                                 .setPositiveButton("Sign out", (confirm, which) -> logout())
                                 .show();
                     });
+            addHomeMatchButton(menu, "Delete account", () -> {
+                dialog.dismiss();
+                showAccountDeletion();
+            });
+            if (isAdmin) {
+                addHomeMatchButton(menu, "Account deletion requests", () -> {
+                    dialog.dismiss();
+                    showAccountDeletionRequests();
+                });
+            }
         }
         dialog.setOnDismissListener(dismissed -> statusChip = null);
         dialog.show();
+    }
+
+    private void showAccountDeletion() {
+        String session = token;
+        String base = serverUrl;
+        io.execute(() -> {
+            try {
+                JSONObject request = new OfficeApi(base).get(ACCOUNT_DELETION_PATH, session);
+                runOnUiThread(() -> {
+                    if (!session.equals(token) || !foreground || isFinishing()) return;
+                    if (request.isNull("requestedAt")) {
+                        confirmAccountDeletion(base, session);
+                    } else {
+                        showDeletionPending();
+                    }
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> toast(errorText(error)));
+            }
+        });
+    }
+
+    private void confirmAccountDeletion(String base, String session) {
+        EditText password = new EditText(this);
+        password.setHint("Current password");
+        password.setSingleLine(true);
+        password.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        LinearLayout fields = vertical();
+        pad(fields, 20, 8, 20, 8);
+        fields.addView(password, lp(-1, -2));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Delete account")
+                .setMessage("Request permanent deletion of your Cue Club account. The office administrator will receive your request.")
+                .setView(fields)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Request deletion", null)
+                .show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            String value = password.getText().toString();
+            if (value.isEmpty()) {
+                password.setError("Enter your current password.");
+                return;
+            }
+            password.setText("");
+            view.setEnabled(false);
+            io.execute(() -> {
+                try {
+                    new OfficeApi(base).post(ACCOUNT_DELETION_PATH, session,
+                            new JSONObject().put("password", value));
+                    runOnUiThread(() -> {
+                        if (dialog.isShowing()) {
+                            dialog.dismiss();
+                            showDeletionPending();
+                        }
+                    });
+                } catch (Exception error) {
+                    runOnUiThread(() -> {
+                        if (dialog.isShowing()) {
+                            password.setError(errorText(error));
+                            view.setEnabled(true);
+                        }
+                    });
+                }
+            });
+        });
+    }
+
+    private void showDeletionPending() {
+        new AlertDialog.Builder(this)
+                .setTitle("Delete account")
+                .setMessage("Your deletion request is pending with the office administrator.")
+                .setPositiveButton("Close", null)
+                .show();
+    }
+
+    private void showAccountDeletionRequests() {
+        String session = token;
+        String base = serverUrl;
+        io.execute(() -> {
+            try {
+                JSONArray requests = new OfficeApi(base)
+                        .get("/admin/account-deletion-requests", session).getJSONArray("requests");
+                StringBuilder summary = new StringBuilder();
+                for (int i = 0; i < requests.length(); i++) {
+                    JSONObject request = requests.getJSONObject(i);
+                    String requestedAt = request.getString("requestedAt");
+                    if (i > 0) summary.append("\n\n");
+                    summary.append(request.getString("name")).append('\n')
+                            .append(request.getString("email")).append('\n')
+                            .append(formatServerDate(requestedAt, requestedAt));
+                }
+                runOnUiThread(() -> {
+                    if (!session.equals(token) || !foreground || isFinishing()) return;
+                    new AlertDialog.Builder(this)
+                            .setTitle("Account deletion requests")
+                            .setMessage(summary.length() == 0 ? "No pending requests." : summary.toString())
+                            .setPositiveButton("Close", null)
+                            .show();
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> toast(errorText(error)));
+            }
+        });
     }
 
     void serverSettings() {
@@ -1165,11 +1280,11 @@ public class MainActivity extends Activity {
     void setupCard() {
         LinearLayout c = card();
         c.setBackground(shape(tone(0xfffff3dc, 0xff484239), 18));
-        c.addView(lineLabel("PC-HOSTED LEAGUE"));
+        c.addView(lineLabel("SERVER CONNECTION"));
         TextView t =
                 text(
-                        "Your profile and results are saved on this phone until the office PC is"
-                                + " connected. They will sync when the server is reachable.",
+                        "Cue Club will sync your profile and queued changes when the server is"
+                                + " reachable.",
                         13,
                         INK,
                         false);
@@ -1471,12 +1586,16 @@ public class MainActivity extends Activity {
     }
 
     private String resultDate(JSONObject match) {
+        return formatServerDate(match.optString("createdAt"), match.optString("date"));
+    }
+
+    private String formatServerDate(String timestamp, String fallback) {
         try {
             return java.text.DateFormat.getDateTimeInstance(
                             java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
-                    .format(new Date(parseServerTime(match.optString("createdAt"))));
+                    .format(new Date(parseServerTime(timestamp)));
         } catch (java.text.ParseException e) {
-            return match.optString("date");
+            return fallback;
         }
     }
 
