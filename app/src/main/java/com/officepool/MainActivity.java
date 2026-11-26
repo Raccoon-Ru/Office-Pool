@@ -29,7 +29,6 @@ public class MainActivity extends Activity {
     private static final String ACCOUNT_DELETION_PATH = "/profiles/me/account-deletion";
     private static final long UPDATE_RETRY_MS = 60_000;
     private static final long UPDATE_CHECK_INTERVAL_MS = 15 * 60_000;
-    static final String WORK_DOMAIN = "@acumensoft.net";
     static final String PREFERENCES_NAME = "MainActivity";
     static final int PICK_PHOTO = 4102;
     private static final int MAX_PHOTO_MB = 15;
@@ -46,6 +45,9 @@ public class MainActivity extends Activity {
     private TextView matchAlertsStatus;
     private TextView poolTableStatus;
     private JSONArray playingNow = new JSONArray();
+    private JSONArray doubles = new JSONArray();
+    private boolean doublesAvailable;
+    private long guestExpiresAt;
     private JSONArray weeklyHighlights = new JSONArray();
     private final Set<String> newResults = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Queue<JSONObject> bracketAdvances = new ConcurrentLinkedQueue<>();
@@ -67,7 +69,8 @@ public class MainActivity extends Activity {
     private enum ResultFilter {
         ALL,
         LEAGUE,
-        ONE_V_ONE
+        ONE_V_ONE,
+        DOUBLES
     }
 
     private ResultFilter resultFilter = ResultFilter.ALL;
@@ -220,6 +223,7 @@ public class MainActivity extends Activity {
         token = prefs.getString("token", "");
         uid = prefs.getString("uid", "");
         sessionName = prefs.getString("sessionName", "");
+        guestExpiresAt = prefs.getLong("guestExpiresAt", 0);
         isAdmin = prefs.getBoolean("isAdmin", false);
         try {
             JSONArray storedMatches = new JSONArray(prefs.getString("matches", "[]"));
@@ -232,6 +236,8 @@ public class MainActivity extends Activity {
         }
         try {
             games = new JSONArray(prefs.getString("games", "[]"));
+            doubles = new JSONArray(prefs.getString("doubles", "[]"));
+            doublesAvailable = prefs.getBoolean("doublesAvailable", false);
         } catch (Exception e) {
             games = new JSONArray();
         }
@@ -271,9 +277,12 @@ public class MainActivity extends Activity {
                 .putString("token", token)
                 .putString("uid", uid)
                 .putString("sessionName", sessionName)
+                .putLong("guestExpiresAt", guestExpiresAt)
                 .putBoolean("isAdmin", isAdmin)
                 .putString("matches", matches.toString())
                 .putString("games", games.toString())
+                .putString("doubles", doubles.toString())
+                .putBoolean("doublesAvailable", doublesAvailable)
                 .putString("season", seasonData.toString())
                 .putString("ratingHistory", ratingHistory.toString())
                 .putString("players", m.toString())
@@ -410,6 +419,7 @@ public class MainActivity extends Activity {
             return;
         }
         JSONObject exactGame = notificationGameId.isEmpty() ? null : findGame(notificationGameId);
+        JSONObject exactDoubles = notificationGameId.isEmpty() ? null : findDoubles(notificationGameId);
         if (exactGame != null && isOwnStartedGame(exactGame)
                 && !exactGame.optString("status").equals("declined")) {
             openMatchTimer(exactGame);
@@ -462,6 +472,7 @@ public class MainActivity extends Activity {
         if (!notificationGameId.isEmpty()) {
             title("MATCH ALERT", "Match", null);
             if (exactGame != null) gameCard(content, exactGame);
+            else if (exactDoubles != null) doublesCard(exactDoubles);
             else content.addView(text(online ? "This match is no longer available." : "Looking for your match…",
                     14, MUTED, false));
             addHomeMatchButton(content, "Back", () -> {
@@ -739,7 +750,7 @@ public class MainActivity extends Activity {
                 "PRIVATE OFFICE LEAGUE",
                 createAccount ? "Create your profile" : "Welcome to Cue Club",
                 createAccount
-                        ? "Use your Acumensoft work email to join the shared scorebook."
+                        ? "Use your email address to join the shared scorebook."
                         : "Sign in to see the shared players and scores.");
         LinearLayout form = vertical();
         pad(form, 18, 16, 18, 16);
@@ -752,14 +763,19 @@ public class MainActivity extends Activity {
             EditText nm = input("Name shown to the office", false);
             form.addView(nm, lp(-1, 52));
             form.addView(spacer(8));
-            form.addView(lineLabel("OFFICE EMAIL"));
-            EditText em = input("name@acumensoft.net", true);
+            form.addView(lineLabel("EMAIL"));
+            EditText em = input("you@example.com", true);
             form.addView(em, lp(-1, 52));
             form.addView(spacer(8));
             form.addView(lineLabel("PASSWORD"));
             EditText pw = input("At least 8 characters", true);
             pw.setInputType(129);
             form.addView(pw, lp(-1, 52));
+            CheckBox guest = new CheckBox(this);
+            guest.setText("Guest account · expires in 24 hours");
+            guest.setTextColor(INK);
+            form.addView(guest, lp(-1, -2));
+            form.addView(text("Leave unchecked for an employee account.", 12, MUTED, false));
             TextView join = button("Create office profile");
             LinearLayout.LayoutParams bp = lp(-1, -2);
             bp.topMargin = dp(14);
@@ -769,11 +785,12 @@ public class MainActivity extends Activity {
                         register(
                                 em.getText().toString().trim(),
                                 pw.getText().toString(),
-                                nm.getText().toString().trim());
+                                nm.getText().toString().trim(),
+                                guest.isChecked());
                     });
         } else {
-            form.addView(lineLabel("OFFICE EMAIL"));
-            EditText em = input("name@acumensoft.net", true);
+            form.addView(lineLabel("EMAIL"));
+            EditText em = input("you@example.com", true);
             form.addView(em, lp(-1, 52));
             form.addView(spacer(8));
             form.addView(lineLabel("PASSWORD"));
@@ -826,8 +843,8 @@ public class MainActivity extends Activity {
     }
 
     void login(String email, String password) {
-        if (!email.toLowerCase(Locale.ROOT).endsWith(WORK_DOMAIN)) {
-            toast("Use your @acumensoft.net work email.");
+        if (email.isEmpty()) {
+            toast("Enter your email address.");
             return;
         }
         if (password.isEmpty()) {
@@ -854,9 +871,9 @@ public class MainActivity extends Activity {
                 });
     }
 
-    void register(String email, String password, String name) {
-        if (!email.toLowerCase(Locale.ROOT).endsWith(WORK_DOMAIN)) {
-            toast("Use your @acumensoft.net work email.");
+    void register(String email, String password, String name, boolean guest) {
+        if (email.isEmpty()) {
+            toast("Enter your email address.");
             return;
         }
         if (name.trim().isEmpty() || password.length() < 8) {
@@ -876,7 +893,8 @@ public class MainActivity extends Activity {
                                         new JSONObject()
                                                 .put("email", email)
                                                 .put("password", password)
-                                                .put("displayName", name));
+                                                .put("displayName", name)
+                                                .put("isGuest", guest));
                         onAuthSuccess(result);
                     } catch (Exception e) {
                         runOnUiThread(() -> toast(errorText(e)));
@@ -885,6 +903,7 @@ public class MainActivity extends Activity {
     }
 
     void onAuthSuccess(JSONObject r) {
+        guestExpiresAt = r.optLong("guestExpiresAt");
         token = r.optString("token");
         uid = r.optJSONObject("member").optString("uid");
         sessionName = r.optJSONObject("member").optString("displayName");
@@ -993,8 +1012,15 @@ public class MainActivity extends Activity {
     }
 
     private void showAccountDeletion() {
+        showAccountDeletion(null);
+    }
+
+    private void showAccountDeletion(OfficeMember player) {
         String base = serverUrl;
         String session = token;
+        String action = player == null ? "Delete account" : "Remove player";
+        String description = player == null ? "Your profile details and photo will be deleted."
+                : "Remove " + player.name + " and delete their profile details and photo?";
         EditText password = new EditText(this);
         password.setHint("Current password");
         password.setSingleLine(true);
@@ -1004,11 +1030,12 @@ public class MainActivity extends Activity {
         pad(fields, 20, 8, 20, 8);
         fields.addView(password, lp(-1, -2));
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Delete account")
-                .setMessage("Your account, profile photo, and match records will be permanently deleted. This cannot be undone.")
+                .setTitle(action)
+                .setMessage(description + " Employee results stay under “Former player.”"
+                        + " Guest match history is removed. Elo is kept. This cannot be undone.")
                 .setView(fields)
                 .setNegativeButton("Cancel", null)
-                .setPositiveButton("Delete account", null)
+                .setPositiveButton(action, null)
                 .show();
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
             String value = password.getText().toString();
@@ -1020,22 +1047,20 @@ public class MainActivity extends Activity {
             view.setEnabled(false);
             io.execute(() -> {
                 try {
-                    new OfficeApi(base).delete(ACCOUNT_DELETION_PATH, session,
+                    String path = player == null ? ACCOUNT_DELETION_PATH : "/admin/players/" + player.uid;
+                    new OfficeApi(base).delete(path, session,
                             new JSONObject().put("password", value));
                     runOnUiThread(() -> {
                         if (!session.equals(token)) return;
                         dialog.dismiss();
-                        String deletedUid = uid;
-                        File photo = pendingPhoto(deletedUid);
-                        clearAccountSession();
-                        if (photo != null) photo.delete();
-                        avatarFile(deletedUid).delete();
-                        NotificationManager notifications = getSystemService(NotificationManager.class);
-                        if (notifications != null) notifications.cancelAll();
-                        prefs.edit().remove("pendingName").remove("pendingNameValue")
-                                .remove("pendingPhoto").remove("pendingPhotoFile")
-                                .remove("pendingPhotoOwner").remove("pendingPhotoMime")
-                                .remove("avatarRevision:" + deletedUid).apply();
+                        if (player != null) {
+                            avatarFile(player.uid).delete();
+                            closeCoworkerProfile();
+                            syncNow();
+                            toast("Player removed.");
+                            return;
+                        }
+                        clearDeletedAccountLocally();
                         toast("Your account was deleted.");
                     });
                 } catch (Exception error) {
@@ -1078,11 +1103,15 @@ public class MainActivity extends Activity {
 
     private void clearAccountSession() {
         token = uid = sessionName = "";
+        guestExpiresAt = 0;
+        createAccount = false;
         isAdmin = showAdminPanel = false;
         page = 0;
         pageHistory.clear();
         matches = new JSONArray();
         games = new JSONArray();
+        doubles = new JSONArray();
+        doublesAvailable = false;
         seasonData = new JSONObject();
         ratingHistory = new JSONArray();
         viewedProfileUid = "";
@@ -1103,6 +1132,20 @@ public class MainActivity extends Activity {
         stopService(new Intent(this, MatchInboxService.class));
         save();
         show();
+    }
+
+    private void clearDeletedAccountLocally() {
+        String deletedUid = uid;
+        File photo = pendingPhoto(deletedUid);
+        if (photo != null) photo.delete();
+        avatarFile(deletedUid).delete();
+        NotificationManager notifications = getSystemService(NotificationManager.class);
+        if (notifications != null) notifications.cancelAll();
+        prefs.edit().remove("pendingName").remove("pendingNameValue")
+                .remove("pendingPhoto").remove("pendingPhotoFile")
+                .remove("pendingPhotoOwner").remove("pendingPhotoMime")
+                .remove("avatarRevision:" + deletedUid).apply();
+        clearAccountSession();
     }
 
     void render() {
@@ -1181,6 +1224,15 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams challengeLayout = lp(-1, -2);
         challengeLayout.bottomMargin = dp(10);
         content.addView(challenge, challengeLayout);
+        if (doublesAvailable) {
+            addHomeMatchButton(content, "Start a 2v2", this::startDoubles);
+            for (int i = 0; i < doubles.length(); i++) {
+                JSONObject game = doubles.optJSONObject(i);
+                if (game != null && doublesPlayerIndex(game, uid) >= 0
+                        && !"confirmed".equals(game.optString("status"))
+                        && !"declined".equals(game.optString("status"))) doublesCard(game);
+            }
+        }
         for (int i = 1; i < actions.size(); i++) {
             JSONObject game = actions.get(i);
             if (game.optString("tournamentMatchId").isEmpty()) gameCard(content, game);
@@ -1428,9 +1480,9 @@ public class MainActivity extends Activity {
         renderOpenGames();
 
         LinearLayout filters = horizontal();
-        ResultFilter[] options = {ResultFilter.ALL, ResultFilter.LEAGUE, ResultFilter.ONE_V_ONE};
-        String[] labels = {"All results", "League", "1v1"};
-        for (int i = 0; i < options.length; i++) {
+        ResultFilter[] options = ResultFilter.values();
+        String[] labels = {"All results", "League", "1v1", "2v2"};
+        for (int i = 0; i < (doublesAvailable ? options.length : options.length - 1); i++) {
             ResultFilter option = options[i];
             boolean selected = resultFilter == option;
             TextView filter = text(labels[i], 13, selected ? Color.WHITE : INK, true);
@@ -1455,24 +1507,33 @@ public class MainActivity extends Activity {
             JSONObject match = matches.optJSONObject(i);
             if (match == null || !match.optBoolean("synced", true)) continue;
             boolean league = match.optBoolean("isLeagueMatch");
-            if (resultFilter == ResultFilter.ALL
-                    || league == (resultFilter == ResultFilter.LEAGUE)) {
+            if (resultFilter == ResultFilter.ALL || (resultFilter != ResultFilter.DOUBLES
+                    && league == (resultFilter == ResultFilter.LEAGUE))) {
                 results.add(match);
             }
         }
+        ArrayList<JSONObject> doublesResults = new ArrayList<>();
+        if (resultFilter == ResultFilter.ALL || resultFilter == ResultFilter.DOUBLES) {
+            for (int i = 0; i < doubles.length(); i++) {
+                JSONObject game = doubles.optJSONObject(i);
+                if (game != null && "confirmed".equals(game.optString("status"))) doublesResults.add(game);
+            }
+        }
+        int resultCount = results.size() + doublesResults.size();
         LinearLayout.LayoutParams section = lp(-1, -2);
         section.topMargin = dp(16);
         section.bottomMargin = dp(8);
         content.addView(
                 lineLabel(
-                        results.size() == 1
+                        resultCount == 1
                                 ? "1 CONFIRMED RESULT"
-                                : results.size() + " CONFIRMED RESULTS"),
+                                : resultCount + " CONFIRMED RESULTS"),
                 section);
-        if (results.isEmpty()) {
+        if (resultCount == 0) {
             emptyCard("No results yet", "Confirmed matches will appear here.");
         } else {
             for (JSONObject match : results) sharedResultCard(match);
+            for (JSONObject game : doublesResults) doublesCard(game);
         }
         TextView add = button("Challenge a player to 1v1");
         add.setOnClickListener(v -> addMatch());
@@ -1658,6 +1719,7 @@ public class MainActivity extends Activity {
         for (int i = 0; i < playingNow.length(); i++) {
             JSONObject game = playingNow.optJSONObject(i);
             if (game == null) continue;
+            if (game.optBoolean("isDoubles")) table.addView(lineLabel("2V2 DOUBLES"));
             LinearLayout players = horizontal();
             for (String side : new String[] {"A", "B"}) {
                 String name = game.optString("player" + side + "Name");
@@ -2367,8 +2429,22 @@ public class MainActivity extends Activity {
     }
 
     void addMatch() {
+        choosePlayer("Choose an opponent", Collections.singleton(uid), opponent ->
+                new AlertDialog.Builder(this)
+                        .setTitle("Send 1v1 invitation?")
+                        .setMessage("Invite " + opponent.name + ". The match starts when they accept.")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Send invite", (confirmation, button) -> createInvite(opponent))
+                        .show());
+    }
+
+    private interface PlayerSelection {
+        void select(OfficeMember player);
+    }
+
+    private void choosePlayer(String heading, Set<String> excluded, PlayerSelection selection) {
         ArrayList<OfficeMember> choices = new ArrayList<>();
-        for (OfficeMember m : members) if (!m.uid.equals(uid)) choices.add(m);
+        for (OfficeMember m : members) if (!excluded.contains(m.uid)) choices.add(m);
         if (choices.isEmpty()) {
             toast("Coworkers appear here after they create their office profiles.");
             return;
@@ -2382,7 +2458,7 @@ public class MainActivity extends Activity {
         surface.setStroke(dp(1), LINE);
         panel.setBackground(surface);
         panel.setFocusableInTouchMode(true);
-        panel.addView(text("Choose an opponent", 22, INK, true));
+        panel.addView(text(heading, 22, INK, true));
         panel.addView(spacer(10));
         EditText search = input("Search players", false);
         search.setContentDescription("Search players");
@@ -2446,12 +2522,7 @@ public class MainActivity extends Activity {
         list.setOnItemClickListener((parent, view, position, id) -> {
             OfficeMember opponent = adapter.getItem(position);
             dialog.dismiss();
-            new AlertDialog.Builder(this)
-                    .setTitle("Send 1v1 invitation?")
-                    .setMessage("Invite " + opponent.name + ". The match starts when they accept.")
-                    .setNegativeButton("Cancel", null)
-                    .setPositiveButton("Send invite", (confirmation, button) -> createInvite(opponent))
-                    .show();
+            selection.select(opponent);
         });
         dialog.setContentView(panel);
         dialog.show();
@@ -2465,6 +2536,131 @@ public class MainActivity extends Activity {
                     | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         }
         panel.requestFocus();
+    }
+
+    private void startDoubles() {
+        if (members.size() < 4) {
+            toast("Four registered players are needed for 2v2.");
+            return;
+        }
+        chooseDoublesPlayers(new ArrayList<>());
+    }
+
+    private void chooseDoublesPlayers(ArrayList<OfficeMember> picks) {
+        String[] headings = {"Choose your teammate", "Choose the first opponent", "Choose the second opponent"};
+        Set<String> excluded = new HashSet<>();
+        excluded.add(uid);
+        for (OfficeMember player : picks) excluded.add(player.uid);
+        choosePlayer(headings[picks.size()], excluded, player -> {
+            picks.add(player);
+            if (picks.size() < headings.length) {
+                chooseDoublesPlayers(picks);
+                return;
+            }
+            new AlertDialog.Builder(this)
+                    .setTitle("Send 2v2 invitations?")
+                    .setMessage(currentName() + " & " + picks.get(0).name + " vs "
+                            + picks.get(1).name + " & " + picks.get(2).name)
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Send invites", (dialog, button) -> {
+                        try {
+                            postServer("/doubles/invite", new JSONObject()
+                                    .put("id", UUID.randomUUID().toString())
+                                    .put("partnerUid", picks.get(0).uid)
+                                    .put("opponentUid", picks.get(1).uid)
+                                    .put("opponentPartnerUid", picks.get(2).uid), "2v2 invitations sent.");
+                        } catch (JSONException error) {
+                            toast(errorText(error));
+                        }
+                    }).show();
+        });
+    }
+
+    private JSONObject findDoubles(String id) {
+        for (int i = 0; i < doubles.length(); i++) {
+            JSONObject game = doubles.optJSONObject(i);
+            if (game != null && id.equals(game.optString("id"))) return game;
+        }
+        return null;
+    }
+
+    private int doublesPlayerIndex(JSONObject game, String playerId) {
+        JSONArray seats = game.optJSONArray("players");
+        if (seats == null) return -1;
+        for (int i = 0; i < seats.length(); i++) {
+            JSONObject player = seats.optJSONObject(i);
+            if (player != null && playerId.equals(player.optString("uid"))) return i;
+        }
+        return -1;
+    }
+
+    private void doublesCard(JSONObject game) {
+        JSONArray seats = game.optJSONArray("players");
+        if (seats == null || seats.length() != 4) return;
+        JSONObject[] players = new JSONObject[4];
+        int accepted = 0, reported = 0;
+        Set<Integer> reports = new HashSet<>();
+        for (int i = 0; i < players.length; i++) {
+            players[i] = seats.optJSONObject(i);
+            if (players[i] == null) return;
+            if (players[i].optBoolean("accepted")) accepted++;
+            if (!players[i].isNull("reportedTeam")) {
+                reports.add(players[i].optInt("reportedTeam"));
+                reported++;
+            }
+        }
+        String[] teams = {
+            players[0].optString("name") + " & " + players[1].optString("name"),
+            players[2].optString("name") + " & " + players[3].optString("name")
+        };
+        String status = game.optString("status");
+        boolean running = "active".equals(status) || "awaiting_confirmation".equals(status);
+        boolean confirmed = "confirmed".equals(status);
+        String path = "/doubles/" + game.optString("id");
+        int me = doublesPlayerIndex(game, uid);
+        LinearLayout panel = card();
+        panel.addView(lineLabel("2V2 DOUBLES"));
+        panel.addView(text(teams[0] + " vs " + teams[1], 17, INK, true));
+        if (confirmed) {
+            panel.addView(text(teams[game.optInt("winnerTeam")] + " won", 15, INK, true));
+            panel.addView(text("Duration · " + elapsed(game.optString("startedAt"),
+                    game.optString("finishedAt")), 13, MUTED, false));
+        } else if (running) {
+            String progress = reports.size() > 1 ? "Players reported different winners"
+                    : reported == 0 ? "Match in progress"
+                    : reported + " of 4 confirmed " + teams[reports.iterator().next()];
+            panel.addView(text(progress, 13, MUTED, false));
+            String started = game.optString("startedAt");
+            TextView clock = text(elapsed(started, ""), 24, tone(0xff285625, GREEN), true);
+            panel.addView(clock);
+            tableClocks.put(clock, started);
+            updateMatchTimer();
+            if (me >= 0) {
+                for (int team = 0; team < teams.length; team++) {
+                    int selected = team;
+                    String label = teams[team] + " won";
+                    if (players[me].optInt("reportedTeam", -1) == team) label += " ✓";
+                    addHomeMatchButton(panel, label, () -> {
+                        try {
+                            postServer(path + "/report", new JSONObject().put("winnerTeam", selected),
+                                    "Result submitted.");
+                        } catch (JSONException error) {
+                            toast(errorText(error));
+                        }
+                    });
+                }
+            }
+        } else if ("invited".equals(status)) {
+            panel.addView(text(accepted + " of 4 ready", 13, MUTED, false));
+            if (me >= 0) {
+                if (!players[me].optBoolean("accepted")) addHomeMatchButton(panel, "Accept", () ->
+                        postServer(path + "/respond", boolPayload("accept", true), "Invitation accepted."));
+                addHomeMatchButton(panel, game.optString("hostUid").equals(uid) ? "Cancel invitation" : "Decline",
+                        () -> postServer(path + "/respond", boolPayload("accept", false), "Invitation closed."));
+            }
+        } else {
+            panel.addView(text("Invitation closed", 13, MUTED, false));
+        }
     }
 
     void createInvite(OfficeMember opponent) {
@@ -3127,6 +3323,7 @@ public class MainActivity extends Activity {
         overview.addView(identity, lp(-1, -2));
         if (mine) addHomeMatchButton(overview, "Edit profile", this::editProfile);
         else addHomeMatchButton(overview, "Back", this::closeCoworkerProfile);
+        if (!mine && isAdmin) addHomeMatchButton(overview, "Remove player", () -> showAccountDeletion(me));
         statRow(overview, "Current Elo", String.valueOf(rating));
 
         int wins = 0, played = 0;
@@ -3194,6 +3391,21 @@ public class MainActivity extends Activity {
                 "Win rate",
                 played == 0 ? "—" : Math.round(100f * wins / played) + "%");
         if (played > 0) statRow(performance, "Recent form · newest first", form.toString());
+        if (doublesAvailable) {
+            int teamWins = 0, teamLosses = 0;
+            for (int i = 0; i < doubles.length(); i++) {
+                JSONObject game = doubles.optJSONObject(i);
+                if (game == null || !"confirmed".equals(game.optString("status"))) continue;
+                int position = doublesPlayerIndex(game, profileUid);
+                if (position < 0) continue;
+                if (position / 2 == game.optInt("winnerTeam")) teamWins++;
+                else teamLosses++;
+            }
+            LinearLayout teamStats = card();
+            teamStats.addView(text("2v2 stats", 19, INK, true));
+            statRow(teamStats, "Confirmed matches", String.valueOf(teamWins + teamLosses));
+            statRow(teamStats, "Wins · losses", teamWins + " · " + teamLosses);
+        }
     }
 
     private View ratingChart(List<Integer> points) {
@@ -3605,6 +3817,9 @@ public class MainActivity extends Activity {
                 + "|"
                 + games.toString()
                 + "|"
+                + doublesAvailable
+                + doubles.toString()
+                + "|"
                 + seasonData.toString()
                 + "|"
                 + playingNow.toString()
@@ -3663,6 +3878,15 @@ public class MainActivity extends Activity {
                                     if (rejectedChange != null) toast(rejectedChange);
                                 });
                     } catch (Exception e) {
+                        if (e instanceof OfficeApi.ApiException
+                                && ((OfficeApi.ApiException) e).code == 401 && guestExpiresAt > 0) {
+                            runOnUiThread(() -> {
+                                if (!auth.equals(token)) return;
+                                clearDeletedAccountLocally();
+                                toast("Your guest account is no longer active.");
+                            });
+                            return;
+                        }
                         online = false;
                         connectionChecked = true;
                         runOnUiThread(
@@ -3751,6 +3975,7 @@ public class MainActivity extends Activity {
 
     void mergeSnapshot(JSONObject snap) throws Exception {
         lastSyncAt = System.currentTimeMillis();
+        guestExpiresAt = snap.optLong("guestExpiresAt", guestExpiresAt);
         connectionChecked = true;
         hasNextUp = snap.has("nextUp");
         nextUp = snap.optJSONObject("nextUp");
@@ -3761,6 +3986,9 @@ public class MainActivity extends Activity {
         }
         isAdmin = snap.optBoolean("isAdmin", isAdmin);
         JSONArray playing = snap.optJSONArray("playingNow");
+        JSONArray teamGames = snap.optJSONArray("doubles");
+        doublesAvailable = teamGames != null;
+        doubles = doublesAvailable ? teamGames : new JSONArray();
         if (motionSnapshotSeen) {
             tableMotionPending |= playing != null && !playing.toString().equals(playingNow.toString());
         }
@@ -3781,6 +4009,14 @@ public class MainActivity extends Activity {
         if (remoteMembers != null)
             for (int i = 0; i < remoteMembers.length(); i++)
                 next.add(OfficeMember.fromJson(remoteMembers.getJSONObject(i)));
+        Set<String> activeMembers = new HashSet<>();
+        for (OfficeMember member : next) activeMembers.add(member.uid);
+        for (OfficeMember member : members) {
+            if (!activeMembers.contains(member.uid)) {
+                avatarFile(member.uid).delete();
+                prefs.edit().remove("avatarRevision:" + member.uid).apply();
+            }
+        }
         members = next;
         JSONArray combined = new JSONArray();
         Set<String> knownResults = new HashSet<>();
@@ -3906,6 +4142,12 @@ public class MainActivity extends Activity {
                 new Runnable() {
                     @Override
                     public void run() {
+                        long now = hasServerClock ? SystemClock.elapsedRealtime() + serverClockOffsetMs
+                                : System.currentTimeMillis();
+                        if (guestExpiresAt > 0 && now >= guestExpiresAt * 1000) {
+                            clearDeletedAccountLocally();
+                            toast("Your guest account expired.");
+                        }
                         if (token.isEmpty()) checkServer();
                         else syncNow();
                         checkForAppUpdate();

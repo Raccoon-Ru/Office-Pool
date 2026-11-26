@@ -10,6 +10,7 @@ const base = "/cue-club/";
 const accountDeletionPath = "/profiles/me/account-deletion";
 const tabs = ["Home", "Results", "Players", "Table", "Profile"];
 let token = localStorage.getItem("cue-token") || "", uid = localStorage.getItem("cue-uid") || "";
+let guestExpiresAt = Number(localStorage.getItem("cue-guest-expiry")) || 0;
 let data = null, online = false, page = "Home", filter = "All", signingUp = false;
 let syncBusy = false, writing = false, clockOffset = 0, timerId = "", lastKey = "";
 let messageTimer, notificationState = "", snapshotRevision = 0, settingsConnection;
@@ -26,6 +27,7 @@ const activeStates = ["active", "awaiting_confirmation", "disputed"];
 const myReport = game => game.playerAUid === uid ? game.reportAWinnerUid : game.reportBWinnerUid;
 const opponentReport = game => game.playerAUid === uid ? game.reportBWinnerUid : game.reportAWinnerUid;
 const byGame = id => data?.games.find(game => game.id === id);
+const doublesGames = () => data?.doubles || [];
 const byMember = id => data?.members.find(member => member.uid === id);
 const formatTime = seconds => [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60]
   .map(value => String(value).padStart(2, "0")).join(":");
@@ -90,9 +92,16 @@ async function checkForWebUpdate() {
 }
 function acceptSnapshot(snapshot) {
   if (snapshot.serverTimeMs) clockOffset = snapshot.serverTimeMs - Date.now();
-  const key = JSON.stringify([snapshot.members, snapshot.games, snapshot.season, snapshot.matches, snapshot.isAdmin, snapshot.ratingHistory, snapshot.playingNow, snapshot.weeklyHighlights, snapshot.nextUp]);
+  const key = JSON.stringify([snapshot.members, snapshot.games, snapshot.doubles, snapshot.season, snapshot.matches, snapshot.isAdmin, snapshot.ratingHistory, snapshot.playingNow, snapshot.weeklyHighlights, snapshot.nextUp]);
   const changed = key !== lastKey || !online;
   if (data && changed) {
+    const activePlayers = new Set(snapshot.members.map(member => member.uid));
+    for (const [key, url] of photoUrls) {
+      if (!activePlayers.has(key.split(":", 1)[0])) {
+        photoUrls.delete(key);
+        url.then(value => value && URL.revokeObjectURL(value));
+      }
+    }
     const known = new Set(data.matches.map(match => match.id));
     snapshot.matches.forEach(match => { if (!known.has(match.id)) motion.results.add(match.id); });
     const oldBracket = data.season?.tournament, nextBracket = snapshot.season?.tournament;
@@ -107,6 +116,7 @@ function acceptSnapshot(snapshot) {
       JSON.stringify(snapshot.playingNow?.map(game => game.id));
   }
   data = snapshot;
+  guestExpiresAt = snapshot.guestExpiresAt || 0;
   online = true;
   lastSyncAt = Date.now();
   lastKey = key;
@@ -126,6 +136,11 @@ function acceptSnapshot(snapshot) {
   updateConnectionLabel();
 }
 async function sync() {
+  if (guestExpiresAt && Date.now() + clockOffset >= guestExpiresAt * 1000) {
+    clearSession();
+    toast("Your guest account expired.");
+    return;
+  }
   if (!token || syncBusy || writing) return;
   syncBusy = true;
   const revision = snapshotRevision, session = token;
@@ -159,6 +174,8 @@ async function change(path, body, success, method = "POST") {
 }
 function clearSession() {
   token = uid = timerId = lastKey = viewedProfile = introPendingId = "";
+  guestExpiresAt = 0;
+  localStorage.removeItem("cue-guest-expiry");
   data = null;
   notificationState = "";
   lastSyncAt = 0;
@@ -190,28 +207,33 @@ function field(label, attrs) {
   return [el("label", {}, label, input), input];
 }
 function signInScreen() {
-  const [emailField, email] = field("Work email", {type:"email", required:true, autocomplete:"email"});
+  const [emailField, email] = field("Email", {type:"email", required:true, autocomplete:"email"});
   const [passwordField, password] = field("Password", {type:"password", required:true,
     autocomplete:signingUp ? "new-password" : "current-password", minlength:signingUp ? 8 : null});
   const [nameField, name] = field("Display name", {required:true, maxlength:48, autocomplete:"name"});
+  const guest = el("input", {type:"checkbox"});
+  const guestChoice = el("div", {class:"account-type"}, el("label", {}, guest, "Guest account · expires in 24 hours"),
+    el("small", {}, "Leave unchecked for an employee account."));
   const submit = el("button", {class:"primary", type:"submit"}, signingUp ? "Create profile" : "Sign in");
   const form = el("form", {onsubmit:async event => {
     event.preventDefault();
     submit.disabled = true;
     try {
       const credentials = {email:email.value.trim(), password:password.value};
-      if (signingUp) credentials.displayName = name.value.trim();
+      if (signingUp) Object.assign(credentials, {displayName:name.value.trim(), isGuest:guest.checked});
       const result = await api(signingUp ? "/auth/register" : "/auth/login", "POST", credentials);
       token = result.token;
       uid = result.member.uid;
+      guestExpiresAt = result.guestExpiresAt || 0;
+      localStorage.setItem("cue-guest-expiry", String(guestExpiresAt));
       localStorage.setItem("cue-token", token);
       localStorage.setItem("cue-uid", uid);
       render();
       await sync();
     } catch (error) { toast(error.message); } finally { submit.disabled = false; }
-  }}, emailField, signingUp && nameField, passwordField, submit);
+  }}, emailField, signingUp && nameField, passwordField, signingUp && guestChoice, submit);
   app.append(el("h1", {}, signingUp ? "Join Cue Club" : "Welcome to Cue Club"),
-    muted("Use your office account to play across iPhone and Android."), card(form),
+    muted("Use your Cue Club account to play across iPhone and Android."), card(form),
     button(signingUp ? "Already registered? Sign in" : "Create an office profile", () => { signingUp = !signingUp; render(); }));
 }
 function avatar(person, fallback = "?") {
@@ -261,12 +283,15 @@ function invite(opponent, matchId = "") {
   dialog.insertBefore(send, dialog.lastChild);
 }
 function challenge() {
-  const people = data.members.filter(member => member.uid !== uid)
+  choosePlayer("Choose an opponent", [uid], invitePlayer => invite(invitePlayer));
+}
+function choosePlayer(heading, excluded, select) {
+  const people = data.members.filter(member => !excluded.includes(member.uid))
     .sort((first, second) => first.displayName.localeCompare(second.displayName));
   if (!people.length) { toast("Coworkers appear here after registering."); return; }
   const [searchField, search] = field("Search players", {type:"search", autocomplete:"off"});
   const players = people.map(member => {
-    const row = button("", () => { dialog.close(); invite(member); }, false,
+    const row = button("", () => { dialog.close(); select(member); }, false,
       {class:"opponent-row", "aria-label":member.displayName});
     row.append(avatar(member), el("span", {}, member.displayName),
       el("span", {"aria-hidden":"true"}, "›"));
@@ -274,7 +299,7 @@ function challenge() {
   });
   const empty = el("p", {class:"muted opponent-empty", role:"status", hidden:true}, "No players match your search.");
   const roster = el("div", {class:"opponent-list"}, ...players, empty);
-  const title = el("h2", {id:"opponent-picker-title", tabindex:-1, autofocus:true}, "Choose an opponent");
+  const title = el("h2", {id:"opponent-picker-title", tabindex:-1, autofocus:true}, heading);
   const dialog = el("dialog", {class:"opponent-picker", "aria-labelledby":title.id},
     title, searchField, roster, button("Cancel", () => dialog.close()));
   dialog.addEventListener("close", () => dialog.remove(), {once:true});
@@ -288,6 +313,58 @@ function challenge() {
   });
   document.body.append(dialog);
   dialog.showModal();
+}
+function challengeDoubles() {
+  if (data.members.length < 4) { toast("Four registered players are needed for 2v2."); return; }
+  const picks = [];
+  const headings = ["Choose your teammate", "Choose the first opponent", "Choose the second opponent"];
+  function next() {
+    choosePlayer(headings[picks.length], [uid, ...picks.map(player => player.uid)], player => {
+      picks.push(player);
+      if (picks.length < 3) { next(); return; }
+      const [partner, opponent, opponentPartner] = picks;
+      const dialog = prompt("Send 2v2 invitations?",
+        muted(self().displayName + " & " + partner.displayName + " vs " +
+          opponent.displayName + " & " + opponentPartner.displayName));
+      const send = button("Send invites", async () => {
+        send.disabled = true;
+        if (await change("/doubles/invite", {id:crypto.randomUUID(), partnerUid:partner.uid,
+          opponentUid:opponent.uid, opponentPartnerUid:opponentPartner.uid}, "2v2 invitations sent.")) dialog.close();
+        else send.disabled = false;
+      }, true);
+      dialog.insertBefore(send, dialog.lastElementChild);
+    });
+  }
+  next();
+}
+const doublesTeamName = (game, team) => game.players.slice(team * 2, team * 2 + 2).map(p => p.name).join(" & ");
+function doublesCard(game) {
+  const me = game.players.find(player => player.uid === uid);
+  const confirmed = game.status === "confirmed";
+  const running = game.status === "active" || game.status === "awaiting_confirmation";
+  const accepted = game.players.filter(player => player.accepted).length;
+  const reports = game.players.filter(player => player.reportedTeam !== null);
+  const split = new Set(reports.map(player => player.reportedTeam)).size > 1;
+  const status = confirmed ? doublesTeamName(game, game.winnerTeam) + " won" :
+    game.status === "invited" ? accepted + " of 4 ready" :
+    game.status === "declined" ? "Invitation closed" :
+    split ? "Players reported different winners" :
+    reports.length ? reports.length + " of 4 confirmed " + doublesTeamName(game, reports[0].reportedTeam) :
+    "Match in progress";
+  const panel = card(el("h2", {}, "2v2 doubles"), el("strong", {},
+    doublesTeamName(game, 0) + " vs " + doublesTeamName(game, 1)), muted(status));
+  if (running) panel.append(el("strong", {class:"table-clock", "data-table-started-at":game.startedAt}));
+  if (confirmed) panel.append(muted("Duration · " + formatTime(Math.max(0,
+    Math.floor((Date.parse(game.finishedAt) - Date.parse(game.startedAt)) / 1000)))));
+  if (!me) return panel;
+  const action = (verb, payload, message) => change("/doubles/" + game.id + "/" + verb, payload, message);
+  if (game.status === "invited") panel.append(el("div", {class:"actions"},
+    !me.accepted && button("Accept", () => action("respond", {accept:true}, "Invitation accepted."), true),
+    button(game.hostUid === uid ? "Cancel invitation" : "Decline", () => action("respond", {accept:false}, "Invitation closed."))));
+  if (running) panel.append(el("div", {class:"actions"}, [0,1].map(team => button(
+    doublesTeamName(game, team) + " won", () => action("report", {winnerTeam:team}, "Result submitted."),
+    false, {"aria-pressed":String(me.reportedTeam === team)}))));
+  return panel;
 }
 function claimNextUp() {
   const people = data.members.filter(member => member.uid !== uid);
@@ -502,7 +579,7 @@ function poolTable() {
         return el("div", {class:"row table-player"}, profilePhoto(byMember(game["player" + side + "Uid"]),name),
           el("strong", {class:"fill"}, name));
       };
-      return el("div", {class:"table-game"}, player("A"), el("small", {}, "VS"), player("B"),
+      return el("div", {class:"table-game"}, player("A"), el("small", {}, game.isDoubles ? "2v2 · VS" : "VS"), player("B"),
         game.startedAt && el("strong", {class:"table-clock", "data-table-started-at":game.startedAt}));
     }));
   if (motion.table) panel.classList.add("table-transition");
@@ -528,7 +605,10 @@ function home() {
     data.games.find(game => own(game) && game.status === "active");
   if (nextAction) app.append(gameCard(nextAction));
   app.append(el("div", {class:"actions"}, button("Challenge a player to 1v1", challenge, !nextAction),
+    data.doubles && button("Start a 2v2", challengeDoubles),
     data.isAdmin && button("Manage office league", adminPanel)));
+  app.append(...doublesGames().filter(game => ["invited","active","awaiting_confirmation"].includes(game.status) &&
+    game.players.some(player => player.uid === uid)).map(doublesCard));
   const tournament = data.season?.tournament;
   const next = tournament?.status === "active" && tournament.matches.find(match =>
     match.playerAUid && match.playerBUid && [match.playerAUid,match.playerBUid].includes(uid) &&
@@ -603,13 +683,15 @@ function results() {
   app.append(el("h1", {}, "Results"), muted(online ? "Confirmed matches from across the office." : "Showing results from your last sync."));
   const open = data.games.filter(game => own(game) && !league(game) && (activeStates.includes(game.status) || game.status === "invited"));
   if (open.length) app.append(el("h2", {}, "1v1 challenges"), ...open.map(gameCard));
-  const options = ["All", "League", "1v1"];
+  const options = data.doubles ? ["All", "League", "1v1", "2v2"] : ["All", "League", "1v1"];
   app.append(el("div", {class:"filters"}, options.map(option => button(option === "All" ? "All results" : option,
     () => {filter = option; render();}, false, {"aria-pressed":String(filter === option)}))));
-  const rows = data.matches.filter(match => filter === "All" || !!match.isLeagueMatch === (filter === "League"));
-  app.append(muted(rows.length + " confirmed " + (rows.length === 1 ? "result" : "results")));
-  const list = el("div", {class:"cards"}, rows.map(resultCard));
-  app.append(rows.length ? list : card(muted("No confirmed results yet.")));
+  const rows = filter === "2v2" ? [] : data.matches.filter(match => filter === "All" || !!match.isLeagueMatch === (filter === "League"));
+  const doubles = ["All","2v2"].includes(filter) ? doublesGames().filter(match => match.status === "confirmed") : [];
+  const count = rows.length + doubles.length;
+  app.append(muted(count + " confirmed " + (count === 1 ? "result" : "results")));
+  const list = el("div", {class:"cards"}, rows.map(resultCard), doubles.map(doublesCard));
+  app.append(count ? list : card(muted("No confirmed results yet.")));
 }
 function record(id) {
   const games = data.matches.filter(match => [match.playerAUid,match.playerBUid].includes(id));
@@ -657,7 +739,8 @@ function profile() {
   app.append(el("h1", {}, mine ? "My profile" : "Player profile"), card(
     el("div", {class:"row profile-identity"}, avatar(me, me?.displayName), el("h2", {class:"fill"}, me?.displayName || "Your profile")),
     stat("Current Elo", rating), mine ? button("Edit profile", editProfile) :
-      button("Back", () => { viewedProfile = ""; page = profileReturn; render(); })));
+      button("Back", () => { viewedProfile = ""; page = profileReturn; render(); }),
+    !mine && data.isAdmin && button("Remove player", () => accountDeletion(me))));
   const progress = card(el("h2", {}, "Elo progression"));
   if (history.length) progress.append(stat("Personal best", history.reduce((best, value) => Math.max(best,value))));
   if (history.length > 1) {
@@ -672,6 +755,14 @@ function profile() {
     stat("Wins · losses", wins + " · " + (ownMatches.length - wins)),
     stat("Win rate", ownMatches.length ? Math.round(wins * 100 / ownMatches.length) + "%" : "—"),
     ownMatches.length ? stat("Recent form · newest first", ownMatches.slice(0,5).map(match => match.winnerUid === profileUid ? "W" : "L").join("  ")) : null));
+  if (data.doubles) {
+    const played = doublesGames().filter(match => match.status === "confirmed" &&
+      match.players.some(player => player.uid === profileUid));
+    const wins = played.filter(match => Math.floor(match.players.findIndex(p => p.uid === profileUid) / 2) ===
+      match.winnerTeam).length;
+    app.append(card(el("h2", {}, "2v2 stats"), stat("Confirmed matches", played.length),
+      stat("Wins · losses", wins + " · " + (played.length - wins))));
+  }
 }
 function ratingChart(points) {
   const firstRating = points[0], lastRating = points.at(-1);
@@ -861,18 +952,30 @@ async function checkConnection() {
   }
   updateConnectionLabel();
 }
-function accountDeletion() {
+function accountDeletion(player = null) {
   const [passwordField, password] = field("Current password", {
     type:"password", autocomplete:"current-password", required:true
   });
+  const action = player ? "Remove player" : "Delete account";
+  const description = player ? "Remove " + player.displayName + " and delete their profile details and photo?" :
+    "Your profile details and photo will be deleted.";
   const message = el("p", {role:"status"},
-    "Your account, profile photo, and match records will be permanently deleted. This cannot be undone.");
-  const submit = button("Delete account", async () => {
+    description + " Employee results stay under “Former player.” Guest match history is removed. Elo is kept. This cannot be undone.");
+  const submit = button(action, async () => {
     if (!password.reportValidity()) return;
     submit.disabled = true;
     try {
-      await api(accountDeletionPath, "DELETE", {password:password.value});
+      await api(player ? "/admin/players/" + encodeURIComponent(player.uid) : accountDeletionPath,
+        "DELETE", {password:password.value});
       dialog.close();
+      if (player) {
+        viewedProfile = "";
+        page = profileReturn;
+        await sync();
+        render();
+        toast("Player removed.");
+        return;
+      }
       clearSession();
       toast("Your account was deleted.");
       pushRegistration?.then(async registration => {
@@ -886,7 +989,7 @@ function accountDeletion() {
       password.value = "";
     }
   });
-  const dialog = prompt("Delete account", message, passwordField, submit);
+  const dialog = prompt(action, message, passwordField, submit);
 }
 function settings() {
   settingsConnection = el("p", {class:online ? "pill" : "pill offline"}, online ? "Server online" : "Server offline");
@@ -915,6 +1018,7 @@ function render(preserve = false) {
   const horizontal = preserve ? document.querySelector(".tree")?.scrollLeft : 0;
   const me = self();
   const notified = notificationGameId && byGame(notificationGameId);
+  const notifiedDoubles = notificationGameId && doublesGames().find(game => game.id === notificationGameId);
   if (notified?.startedAt && own(notified) && notified.status !== "declined") {
     timerId = notified.id;
     markTimerSeen(notified);
@@ -934,7 +1038,7 @@ function render(preserve = false) {
   if (!token) signInScreen();
   else if (!data) app.append(el("h1", {}, "Cue Club"), muted("Connecting to the server…"), button("Retry", sync));
   else if (notificationGameId) {
-    if (notified) {
+    if (notified || notifiedDoubles) {
       const url = new URL(location.href);
       if (url.searchParams.has("match")) {
         url.searchParams.delete("match");
@@ -943,7 +1047,8 @@ function render(preserve = false) {
     }
     if (timerId && notified) timerScreen(notified);
     else {
-      app.append(el("h1", {}, "Match"), notified ? gameCard(notified) : muted("This match is no longer available."),
+      app.append(el("h1", {}, "Match"), notified ? gameCard(notified) :
+        notifiedDoubles ? doublesCard(notifiedDoubles) : muted("This match is no longer available."),
         button("Back", () => { notificationGameId = ""; render(); }));
     }
   }

@@ -87,6 +87,9 @@ def initialize_postgres(db, schema):
     db.execute("REVOKE ALL ON SCHEMA cue_club FROM PUBLIC")
     # Current queries share SQLite SQL apart from this column collation.
     db.executescript(schema.replace(" COLLATE NOCASE", ""))
+    db.execute("ALTER TABLE members ADD COLUMN IF NOT EXISTS removed_at TEXT NOT NULL DEFAULT ''")
+    db.execute("ALTER TABLE members ADD COLUMN IF NOT EXISTS guest_expires_at BIGINT NOT NULL DEFAULT 0")
+    db.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS rating_only INTEGER NOT NULL DEFAULT 0")
     db.execute(
         "ALTER TABLE seasons ADD COLUMN IF NOT EXISTS deadline_ms BIGINT NOT NULL DEFAULT 0"
     )

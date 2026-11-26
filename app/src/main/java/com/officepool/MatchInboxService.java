@@ -109,6 +109,10 @@ public final class MatchInboxService extends Service {
                                     for (int i = 0; i < games.length(); i++) {
                                         notifyIfNeeded(games.optJSONObject(i), admin);
                                     }
+                                    JSONArray doubles = snapshot.optJSONArray("doubles");
+                                    if (doubles != null) for (int i = 0; i < doubles.length(); i++) {
+                                        notifyDoubles(doubles.optJSONObject(i));
+                                    }
                                 });
                     } catch (Exception ignored) {
                         // Try again on the next poll.
@@ -166,9 +170,39 @@ public final class MatchInboxService extends Service {
                             + " gets the win. Stats are updated.";
         }
         if (event.isEmpty()) return;
+        publishNotice(id, event, title, message, !game.optString("tournamentMatchId").isEmpty());
+    }
+
+    private void notifyDoubles(JSONObject game) {
+        if (game == null) return;
+        JSONArray players = game.optJSONArray("players");
+        if (players == null) return;
+        String uid = prefs.getString("uid", "");
+        for (int i = 0; i < players.length(); i++) {
+            JSONObject player = players.optJSONObject(i);
+            if (player == null || !uid.equals(player.optString("uid"))) continue;
+            String id = game.optString("id");
+            switch (game.optString("status")) {
+                case "invited":
+                    if (!player.optBoolean("accepted")) publishNotice(id, "2v2-invite",
+                            "2v2 pool invitation", "Tap to review and accept.", false);
+                    break;
+                case "active":
+                    publishNotice(id, "2v2-started", "2v2 match started",
+                            "Everyone accepted. Tap to open the timer.", false);
+                    break;
+                case "awaiting_confirmation":
+                    if (player.isNull("reportedTeam")) publishNotice(id, "2v2-confirm",
+                            "Confirm your 2v2 result", "A player reported the winning team.", false);
+                    break;
+            }
+            return;
+        }
+    }
+
+    private void publishNotice(String id, String event, String title, String message, boolean leagueMatch) {
         String key = "gameNotice:" + id + ":" + event;
         if (prefs.getBoolean(key, false)) return;
-        boolean leagueMatch = !game.optString("tournamentMatchId").isEmpty();
         Intent open =
                 new Intent(this, MainActivity.class)
                         .putExtra(LEAGUE_NOTIFICATION, leagueMatch)

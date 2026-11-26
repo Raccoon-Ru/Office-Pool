@@ -20,6 +20,8 @@ TABLES = (
     "tournaments",
     "tournament_matches",
     "games",
+    "doubles_games",
+    "doubles_players",
 )
 ORDERED = {"matches", "seasons", "games"}
 
@@ -51,7 +53,7 @@ def import_backup(archive: Path):
                 for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
             for table in TABLES:
-                if table in {"account_deletion_requests", "table_next_up"} and table not in source_tables:
+                if table in {"account_deletion_requests", "table_next_up", "doubles_games", "doubles_players"} and table not in source_tables:
                     counts[table] = 0
                     continue
                 # Insertion order is the tiebreaker for Elo when result timestamps match.

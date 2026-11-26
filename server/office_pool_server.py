@@ -8,6 +8,7 @@ import json
 import mimetypes
 import os
 import random
+import re
 import secrets
 import sqlite3
 import threading
@@ -83,16 +84,7 @@ def now_iso() -> str:
 def get_config() -> dict:
     if ON_RENDER and not database.POSTGRES:
         raise RuntimeError("Render requires DATABASE_URL.")
-    cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8")) if CONFIG_FILE.is_file() else {}
-    cfg["office_domain"] = (
-        os.environ.get(
-            "OFFICE_POOL_DOMAIN", str(cfg.get("office_domain", "acumensoft.net"))
-        )
-        .strip()
-        .lower()
-        .lstrip("@")
-    )
-    return cfg
+    return json.loads(CONFIG_FILE.read_text(encoding="utf-8")) if CONFIG_FILE.is_file() else {}
 
 
 CONFIG = get_config()
@@ -115,6 +107,8 @@ SCHEMA = """
                 password_salt TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
                 photo_file TEXT NOT NULL DEFAULT '',
+                removed_at TEXT NOT NULL DEFAULT '',
+                guest_expires_at BIGINT NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -140,6 +134,7 @@ SCHEMA = """
                 player_b_name TEXT NOT NULL,
                 winner_uid TEXT NOT NULL,
                 recorded_by_uid TEXT NOT NULL,
+                rating_only INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS matches_created_at ON matches(created_at DESC);
@@ -206,6 +201,25 @@ SCHEMA = """
             );
             CREATE INDEX IF NOT EXISTS games_stats_match ON games(stats_match_id) WHERE stats_match_id<>'';
             CREATE INDEX IF NOT EXISTS games_players_status ON games(player_a_uid,player_b_uid,status,created_at DESC);
+            CREATE TABLE IF NOT EXISTS doubles_games (
+                id TEXT PRIMARY KEY,
+                host_uid TEXT NOT NULL REFERENCES members(uid),
+                status TEXT NOT NULL DEFAULT 'invited',
+                created_at TEXT NOT NULL,
+                started_at TEXT NOT NULL DEFAULT '',
+                finished_at TEXT NOT NULL DEFAULT '',
+                winner_team INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS doubles_players (
+                game_id TEXT NOT NULL REFERENCES doubles_games(id) ON DELETE CASCADE,
+                uid TEXT NOT NULL REFERENCES members(uid),
+                seat INTEGER NOT NULL CHECK(seat BETWEEN 0 AND 3),
+                accepted INTEGER NOT NULL DEFAULT 0,
+                reported_team INTEGER CHECK(reported_team IN (0,1)),
+                PRIMARY KEY(game_id,uid),
+                UNIQUE(game_id,seat)
+            );
+            CREATE INDEX IF NOT EXISTS doubles_players_member ON doubles_players(uid,game_id);
 """
 
 
@@ -221,16 +235,46 @@ def init_db(sync_admin: bool = True) -> None:
                 db.execute(
                     "ALTER TABLE members ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
                 )
+            if "removed_at" not in columns:
+                db.execute("ALTER TABLE members ADD COLUMN removed_at TEXT NOT NULL DEFAULT ''")
+            if "guest_expires_at" not in columns:
+                db.execute("ALTER TABLE members ADD COLUMN guest_expires_at BIGINT NOT NULL DEFAULT 0")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(matches)")}
+            if "rating_only" not in columns:
+                db.execute("ALTER TABLE matches ADD COLUMN rating_only INTEGER NOT NULL DEFAULT 0")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(seasons)")}
             if "deadline_ms" not in columns:
                 db.execute(
                     "ALTER TABLE seasons ADD COLUMN deadline_ms INTEGER NOT NULL DEFAULT 0"
                 )
+        db.execute("""CREATE INDEX IF NOT EXISTS members_guest_expiry ON members(guest_expires_at)
+                      WHERE guest_expires_at>0 AND removed_at=''""")
         if sync_admin:
             db.execute(
                 "UPDATE members SET is_admin=CASE WHEN lower(email)=? THEN 1 ELSE 0 END",
                 (ADMIN_EMAIL,),
             )
+
+
+def doubles_snapshot(db, uid: str) -> list[dict]:
+    rows = db.execute(
+        """SELECT g.*, p.uid, p.seat, p.accepted, p.reported_team, m.display_name
+           FROM doubles_games g JOIN doubles_players p ON p.game_id=g.id
+           JOIN members m ON m.uid=p.uid
+           WHERE g.status IN ('active','awaiting_confirmation','confirmed')
+              OR EXISTS (SELECT 1 FROM doubles_players my WHERE my.game_id=g.id AND my.uid=?)
+           ORDER BY g.created_at DESC, g.id, p.seat""", (uid,)
+    ).fetchall()
+    games = {}
+    for row in rows:
+        game = games.setdefault(row["id"], {
+            "id": row["id"], "hostUid": row["host_uid"], "status": row["status"],
+            "createdAt": row["created_at"], "startedAt": row["started_at"],
+            "finishedAt": row["finished_at"], "winnerTeam": row["winner_team"], "players": [],
+        })
+        game["players"].append({"uid": row["uid"], "name": row["display_name"],
+                                "accepted": bool(row["accepted"]), "reportedTeam": row["reported_team"]})
+    return list(games.values())
 
 
 def password_hash(password: str, salt: bytes | None = None) -> tuple[str, str]:
@@ -437,6 +481,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         with DB_LOCK, connect_db() as db:
+            expire_guests(db)
             row = db.execute(
                 "SELECT s.uid, s.created_at FROM sessions s WHERE s.token_hash=?",
                 (token_hash,),
@@ -491,7 +536,7 @@ class Handler(BaseHTTPRequestHandler):
                     ORDER BY m.created_at DESC, m.{database.ORDER_COLUMN} DESC"""
             ).fetchall()
             admin = db.execute(
-                "SELECT is_admin FROM members WHERE uid=?", (uid,)
+                "SELECT is_admin,guest_expires_at FROM members WHERE uid=?", (uid,)
             ).fetchone()
             expire_leagues(db)
             season_row = db.execute(
@@ -598,6 +643,7 @@ class Handler(BaseHTTPRequestHandler):
             next_up = db.execute(
                 "SELECT player_a_uid,player_b_uid FROM table_next_up WHERE id=1"
             ).fetchone()
+            doubles = doubles_snapshot(db, uid)
         games = [
             {
                 "id": row["id"],
@@ -621,20 +667,22 @@ class Handler(BaseHTTPRequestHandler):
             for row in game_rows
         ]
         ratings, rating_changes, rating_history, winner_elos = scorebook_ratings(members, matches)
+        visible_matches = [match for match in matches if not match["rating_only"]]
         return {
             "members": [
                 member_json(
                     member, ratings[member["uid"]], rating_history[member["uid"]]
                 )
-                for member in members
+                for member in members if not member["removed_at"]
             ],
             "matches": [
                 match_json(match, rating_changes.get(match["id"]), winner_elos.get(match["id"]))
-                for match in matches
+                for match in visible_matches
             ],
             "games": games,
+            "doubles": doubles,
             "weeklyHighlights": weekly_highlights(
-                members, matches, rating_changes, datetime.now(timezone.utc)
+                members, visible_matches, rating_changes, datetime.now(timezone.utc)
             ),
             "ratingHistory": rating_history.get(uid, [ELO_START]),
             "playingNow": [
@@ -648,8 +696,14 @@ class Handler(BaseHTTPRequestHandler):
                     "isLeagueMatch": bool(row["tournament_match_id"]),
                 }
                 for row in playing
+            ] + [
+                {"id": game["id"], "startedAt": game["startedAt"], "isDoubles": True,
+                 "playerAName": " & ".join(player["name"] for player in game["players"][:2]),
+                 "playerBName": " & ".join(player["name"] for player in game["players"][2:])}
+                for game in doubles if game["status"] in ("active", "awaiting_confirmation")
             ],
             "isAdmin": bool(admin and admin["is_admin"]),
+            "guestExpiresAt": admin["guest_expires_at"] if admin else 0,
             "nextUp": (
                 {"playerAUid": next_up["player_a_uid"], "playerBUid": next_up["player_b_uid"]}
                 if next_up else None
@@ -843,6 +897,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/sync": self.sync_pending,
                 "/admin/seasons": self.admin_start_season,
                 "/games/invite": self.create_game_invite,
+                "/doubles/invite": self.invite_doubles,
                 "/table/next-up": self.update_next_up,
                 "/profiles/me/photo": self.upload_photo,
                 "/web-push/subscribe": self.manage_web_push,
@@ -865,11 +920,14 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/games/"):
                 self.game_action(path)
                 return
+            if path.startswith("/doubles/"):
+                self.doubles_action(path)
+                return
             self.send_json(404, {"error": "Not found"})
         except ValueError as exc:
             self.send_json(400, {"error": str(exc)})
         except sqlite3.IntegrityError:
-            self.send_json(409, {"error": "That work email already has a profile."})
+            self.send_json(409, {"error": "That email address already has a profile."})
         except Exception as exc:
             print("Request failed:", type(exc).__name__, str(exc))
             self.send_json(
@@ -890,22 +948,33 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Name must be between 1 and 48 characters.")
             with DB_LOCK, connect_db() as db:
                 db.execute(
-                    "UPDATE members SET display_name=?, updated_at=? WHERE uid=?",
+                    "UPDATE members SET display_name=?, updated_at=? WHERE uid=? AND removed_at=''",
                     (name, now_iso(), uid),
                 )
-                row = db.execute("SELECT * FROM members WHERE uid=?", (uid,)).fetchone()
+                row = db.execute("SELECT * FROM members WHERE uid=? AND removed_at=''", (uid,)).fetchone()
+                if row is None:
+                    self.send_json(401, {"error": "Sign in again to continue."})
+                    return
             self.send_json(200, {"member": member_json(row)})
         except ValueError as exc:
             self.send_json(400, {"error": str(exc)})
 
     def register(self) -> None:
         data = self.read_json()
-        email = str(data.get("email", "")).strip().lower()
+        raw_email = data.get("email")
+        email = raw_email.strip().lower() if isinstance(raw_email, str) else ""
         name = str(data.get("displayName", "")).strip()
         password = str(data.get("password", ""))
+        guest_expires_at = int(time.time()) + 86400 if data.get("isGuest") is True else 0
         local, _, domain = email.partition("@")
-        if not local or any(char.isspace() for char in email) or domain != CONFIG["office_domain"]:
-            raise ValueError("Use your office email address.")
+        label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+        if (
+            len(email) > 254
+            or len(local) > 64
+            or not re.fullmatch(r"[^@\s\x00-\x1f\x7f]+", local)
+            or not re.fullmatch(rf"{label}(?:\.{label})*", domain)
+        ):
+            raise ValueError("Enter a valid email address.")
         if email == ADMIN_EMAIL:
             raise ValueError("This address is reserved for the office administrator.")
         if not 1 <= len(name) <= 48:
@@ -916,8 +985,10 @@ class Handler(BaseHTTPRequestHandler):
         salt, digest = password_hash(password)
         stamp = now_iso()
         with DB_LOCK, connect_db() as db:
+            expire_guests(db)
             db.execute(
-                "INSERT INTO members(uid,email,display_name,password_salt,password_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                """INSERT INTO members(uid,email,display_name,password_salt,password_hash,
+                                       created_at,updated_at,guest_expires_at) VALUES(?,?,?,?,?,?,?,?)""",
                 (
                     uid,
                     email,
@@ -926,12 +997,14 @@ class Handler(BaseHTTPRequestHandler):
                     digest,
                     stamp,
                     stamp,
+                    guest_expires_at,
                 ),
             )
             token = self.new_session(db, uid)
             member = db.execute("SELECT * FROM members WHERE uid=?", (uid,)).fetchone()
         self.send_json(
-            201, {"token": token, "member": member_json(member), "email": email}
+            201, {"token": token, "member": member_json(member), "email": email,
+                  "guestExpiresAt": guest_expires_at}
         )
 
     def login(self) -> None:
@@ -939,7 +1012,8 @@ class Handler(BaseHTTPRequestHandler):
         email = str(data.get("email", "")).strip().lower()
         password = str(data.get("password", ""))
         with DB_LOCK, connect_db() as db:
-            row = db.execute("SELECT * FROM members WHERE email=?", (email,)).fetchone()
+            expire_guests(db)
+            row = db.execute("SELECT * FROM members WHERE email=? AND removed_at=''", (email,)).fetchone()
             if not row:
                 raise ValueError("Email or password is incorrect.")
             _, digest = password_hash(password, bytes.fromhex(row["password_salt"]))
@@ -947,7 +1021,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Email or password is incorrect.")
             token = self.new_session(db, row["uid"])
         self.send_json(
-            200, {"token": token, "member": member_json(row), "email": email}
+            200, {"token": token, "member": member_json(row), "email": email,
+                  "guestExpiresAt": row["guest_expires_at"]}
         )
 
     def new_session(self, db: sqlite3.Connection, uid: str) -> str:
@@ -972,19 +1047,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"ok": True})
 
     def do_DELETE(self) -> None:
-        if urlparse(self.path).path != ACCOUNT_DELETION_PATH:
+        path = urlparse(self.path).path
+        parts = path.strip("/").split("/")
+        target = parts[2] if len(parts) == 3 and parts[:2] == ["admin", "players"] else None
+        if path != ACCOUNT_DELETION_PATH and not target:
             self.send_json(404, {"error": "Not found"})
             return
         try:
-            self.delete_account()
+            self.delete_account(target)
         except ValueError as exc:
             self.send_json(400, {"error": str(exc)})
         except Exception as exc:
             print("Account deletion failed:", type(exc).__name__)
             self.send_json(500, {"error": "Could not delete your account. Try again."})
 
-    def delete_account(self) -> None:
-        uid, ok = self.require_user()
+    def delete_account(self, target: str | None = None) -> None:
+        uid, ok = self.require_admin() if target else self.require_user()
         if not ok:
             return
         password = self.read_json().get("password")
@@ -992,7 +1070,8 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Enter your current password.")
         with DB_LOCK, connect_db() as db:
             member = db.execute(
-                "SELECT password_salt,password_hash,photo_file FROM members WHERE uid=?", (uid,)
+                """SELECT password_salt,password_hash,photo_file,guest_expires_at
+                   FROM members WHERE uid=? AND removed_at=''""", (uid,)
             ).fetchone()
             if member is None:
                 self.send_json(401, {"error": "Sign in again to continue."})
@@ -1001,12 +1080,18 @@ class Handler(BaseHTTPRequestHandler):
             if not hmac.compare_digest(digest, member["password_hash"]):
                 self.send_json(400, {"error": "Current password is incorrect."})
                 return
-            remove_account_data(db, uid)
-            photo = member["photo_file"]
-            if photo and database.POSTGRES:
-                db.execute("DELETE FROM profile_photos WHERE filename=?", (photo,))
-            elif photo:
-                (PHOTOS / photo).unlink(missing_ok=True)
+            if target:
+                if target == uid:
+                    raise ValueError("Use Delete account in your settings to delete your own account.")
+                player = db.execute(
+                    "SELECT photo_file,guest_expires_at FROM members WHERE uid=? AND removed_at=''", (target,)
+                ).fetchone()
+                if player is None:
+                    self.send_json(404, {"error": "Player not found."})
+                    return
+                remove_account_data(db, target, player["photo_file"], bool(player["guest_expires_at"]))
+            else:
+                remove_account_data(db, uid, member["photo_file"], bool(member["guest_expires_at"]))
         self.send_json(200, {"ok": True})
 
     def sync_pending(self) -> None:
@@ -1043,7 +1128,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("End the current season before starting another.")
             participants = [
                 row["uid"]
-                for row in db.execute("SELECT uid FROM members ORDER BY uid").fetchall()
+                for row in db.execute(
+                    "SELECT uid FROM members WHERE removed_at='' AND guest_expires_at=0 ORDER BY uid"
+                ).fetchall()
             ]
             if len(participants) < 2:
                 raise ValueError(
@@ -1172,7 +1259,7 @@ class Handler(BaseHTTPRequestHandler):
                 b_uid = players[1] if uid == players[0] else players[0]
             if not b_uid or a_uid == b_uid:
                 raise ValueError("Choose a coworker to challenge.")
-            if not db.execute("SELECT 1 FROM members WHERE uid=?", (b_uid,)).fetchone():
+            if not db.execute("SELECT 1 FROM members WHERE uid=? AND removed_at=''", (b_uid,)).fetchone():
                 raise ValueError("That office profile could not be found.")
             if (
                 not tournament_match_id
@@ -1206,6 +1293,92 @@ class Handler(BaseHTTPRequestHandler):
         )
         self.send_json(201, self.league_snapshot(uid))
 
+    def invite_doubles(self) -> None:
+        uid, ok = self.require_user()
+        if not ok:
+            return
+        data = self.read_json()
+        game_id = str(data.get("id", ""))[:64]
+        picks = [data.get(key) for key in ("partnerUid", "opponentUid", "opponentPartnerUid")]
+        if (not game_id or any(not isinstance(pick, str) or not pick for pick in picks)
+                or len(set([uid, *picks])) != 4):
+            raise ValueError("Choose three different coworkers for a 2v2 match.")
+        seats = [uid, *picks]
+        with DB_LOCK, connect_db() as db:
+            existing = db.execute("SELECT host_uid FROM doubles_games WHERE id=?", (game_id,)).fetchone()
+            if existing and existing["host_uid"] != uid:
+                raise ValueError("That match ID is already in use.")
+            if not existing:
+                members = db.execute("SELECT uid FROM members WHERE removed_at='' AND uid IN (?,?,?,?)", seats).fetchall()
+                if len(members) != 4:
+                    raise ValueError("An office profile could not be found.")
+                db.execute("INSERT INTO doubles_games(id,host_uid,created_at) VALUES(?,?,?)",
+                           (game_id, uid, now_iso()))
+                for seat, player in enumerate(seats):
+                    db.execute("INSERT INTO doubles_players(game_id,uid,seat,accepted) VALUES(?,?,?,?)",
+                               (game_id, player, seat, int(seat == 0)))
+        if not existing:
+            send_match_alert(set(picks), game_id, "2v2 pool invitation",
+                             "You’ve been invited to a doubles match. Open Cue Club to respond.")
+        self.send_json(200 if existing else 201, self.league_snapshot(uid))
+
+    def doubles_action(self, path: str) -> None:
+        uid, ok = self.require_user()
+        if not ok:
+            return
+        parts = path.strip("/").split("/")
+        if len(parts) != 3 or parts[2] not in ("respond", "report"):
+            self.send_json(404, {"error": "Not found"})
+            return
+        _, game_id, action = parts
+        data = self.read_json()
+        alert = None
+        with DB_LOCK, connect_db() as db:
+            game = db.execute("SELECT * FROM doubles_games WHERE id=?", (game_id,)).fetchone()
+            seats = db.execute("SELECT * FROM doubles_players WHERE game_id=? ORDER BY seat",
+                               (game_id,)).fetchall()
+            me = next((player for player in seats if player["uid"] == uid), None)
+            if not game or me is None:
+                self.send_json(404, {"error": "2v2 match not found."})
+                return
+            others = [player for player in seats if player["uid"] != uid]
+            if action == "respond":
+                accept = data.get("accept")
+                if type(accept) is not bool:
+                    raise ValueError("Choose whether to accept the invitation.")
+                if game["status"] == "invited":
+                    if not accept:
+                        db.execute("UPDATE doubles_games SET status='declined',finished_at=? WHERE id=?",
+                                   (now_iso(), game_id))
+                    else:
+                        db.execute("UPDATE doubles_players SET accepted=1 WHERE game_id=? AND uid=?", (game_id, uid))
+                        if all(player["accepted"] for player in others):
+                            db.execute("UPDATE doubles_games SET status='active',started_at=? WHERE id=?",
+                                       (now_iso(), game_id))
+                            alert = (others, "2v2 match started", "Everyone accepted. Open Cue Club for the timer.")
+                elif not ((accept and me["accepted"]) or (not accept and game["status"] == "declined")):
+                    raise ValueError("This invitation is closed.")
+            else:
+                team = data.get("winnerTeam")
+                if type(team) is not int or team not in (0, 1):
+                    raise ValueError("Choose one of the two teams as the winner.")
+                if game["status"] in ("active", "awaiting_confirmation"):
+                    db.execute("UPDATE doubles_players SET reported_team=? WHERE game_id=? AND uid=?",
+                               (team, game_id, uid))
+                    if all(player["reported_team"] == team for player in others):
+                        db.execute("""UPDATE doubles_games SET status='confirmed',winner_team=?,finished_at=?
+                                      WHERE id=?""", (team, now_iso(), game_id))
+                    else:
+                        db.execute("UPDATE doubles_games SET status='awaiting_confirmation' WHERE id=?", (game_id,))
+                        if game["status"] == "active":
+                            alert = (others, "Confirm your 2v2 result", "A player reported the winning team.")
+                elif game["status"] != "confirmed" or me["reported_team"] != team:
+                    raise ValueError("This match is not waiting for a result.")
+        if alert:
+            recipients, title, body = alert
+            send_match_alert({player["uid"] for player in recipients}, game_id, title, body)
+        self.send_json(200, self.league_snapshot(uid))
+
     def update_next_up(self) -> None:
         uid, ok = self.require_user()
         if not ok:
@@ -1223,7 +1396,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 opponent = data.get("opponentUid")
                 if not isinstance(opponent, str) or opponent == uid or not db.execute(
-                    "SELECT 1 FROM members WHERE uid=?", (opponent,)
+                    "SELECT 1 FROM members WHERE uid=? AND removed_at=''", (opponent,)
                 ).fetchone():
                     raise ValueError("Choose a coworker to play next with.")
                 inserted = db.execute(
@@ -1414,9 +1587,13 @@ class Handler(BaseHTTPRequestHandler):
         path = PHOTOS / filename
         with DB_LOCK:
             with connect_db() as db:
-                previous = db.execute(
-                    "SELECT photo_file FROM members WHERE uid=?", (uid,)
-                ).fetchone()["photo_file"]
+                member = db.execute(
+                    "SELECT photo_file FROM members WHERE uid=? AND removed_at=''", (uid,)
+                ).fetchone()
+                if member is None:
+                    self.send_json(401, {"error": "Sign in again to continue."})
+                    return
+                previous = member["photo_file"]
                 if database.POSTGRES:
                     db.execute(
                         "INSERT INTO profile_photos(filename,content) VALUES(?,?) ON CONFLICT(filename) DO NOTHING",
@@ -1445,7 +1622,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"photoPath": filename})
 
 
-def remove_account_data(db, uid):
+def expire_guests(db):
+    expired = db.execute(
+        """SELECT uid,photo_file FROM members
+           WHERE guest_expires_at>0 AND guest_expires_at<=? AND removed_at=''""",
+        (int(time.time()),),
+    ).fetchall()
+    for guest in expired:
+        remove_account_data(db, guest["uid"], guest["photo_file"], True)
+
+
+def remove_account_data(db, uid, photo, guest=False):
+    db.execute(
+        """DELETE FROM doubles_players WHERE game_id IN (
+               SELECT p.game_id FROM doubles_players p JOIN doubles_games g ON g.id=p.game_id
+               WHERE p.uid=? AND (g.status<>'confirmed' OR ?=1)
+           )""", (uid, int(guest))
+    )
+    db.execute("DELETE FROM doubles_games WHERE NOT EXISTS (SELECT 1 FROM doubles_players WHERE game_id=doubles_games.id)")
     affected = db.execute(
         """SELECT DISTINCT tm.tournament_id FROM tournament_matches tm
            JOIN tournaments t ON t.id=tm.tournament_id WHERE t.status='active'
@@ -1463,28 +1657,33 @@ def remove_account_data(db, uid):
         (uid, uid, uid, uid),
     )
     db.execute(
-        """UPDATE tournament_matches SET
-           player_a_uid=CASE WHEN player_a_uid=? THEN '' ELSE player_a_uid END,
-           player_b_uid=CASE WHEN player_b_uid=? THEN '' ELSE player_b_uid END,
-           winner_uid=CASE WHEN winner_uid=? THEN '' ELSE winner_uid END
-           WHERE player_a_uid=? OR player_b_uid=? OR winner_uid=?""",
-        (uid, uid, uid, uid, uid, uid),
+        """DELETE FROM games WHERE (status<>'confirmed' OR ?=1)
+           AND (player_a_uid=? OR player_b_uid=? OR initiated_by_uid=?)""",
+        (int(guest), uid, uid, uid),
     )
-    db.execute("UPDATE tournaments SET champion_uid='' WHERE champion_uid=?", (uid,))
-    db.execute(
-        """UPDATE tournament_matches SET game_id='',stats_match_id=''
-           WHERE game_id IN (SELECT id FROM games WHERE player_a_uid=? OR player_b_uid=? OR initiated_by_uid=?)
-              OR stats_match_id IN (SELECT id FROM matches WHERE player_a_uid=? OR player_b_uid=?)""",
-        (uid, uid, uid, uid, uid),
-    )
-    db.execute("DELETE FROM games WHERE player_a_uid=? OR player_b_uid=? OR initiated_by_uid=?", (uid, uid, uid))
-    db.execute("DELETE FROM matches WHERE player_a_uid=? OR player_b_uid=?", (uid, uid))
+    db.execute("UPDATE matches SET player_a_name='Former player' WHERE player_a_uid=?", (uid,))
+    db.execute("UPDATE matches SET player_b_name='Former player' WHERE player_b_uid=?", (uid,))
+    if guest:
+        db.execute(
+            """UPDATE matches SET rating_only=1,player_a_name='',player_b_name='',recorded_by_uid=''
+               WHERE player_a_uid=? OR player_b_uid=?""", (uid, uid)
+        )
     db.execute("UPDATE matches SET recorded_by_uid='' WHERE recorded_by_uid=?", (uid,))
     db.execute("DELETE FROM web_push_subscriptions WHERE uid=?", (uid,))
     db.execute("DELETE FROM table_next_up WHERE player_a_uid=? OR player_b_uid=?", (uid, uid))
     db.execute("DELETE FROM sessions WHERE uid=?", (uid,))
     db.execute("DELETE FROM account_deletion_requests WHERE uid=?", (uid,))
-    db.execute("DELETE FROM members WHERE uid=?", (uid,))
+    # Keep the anonymous match identity so replaying Elo uses the original opponents.
+    db.execute(
+        """UPDATE members SET email=?,display_name='Former player',is_admin=0,password_salt='',
+           password_hash='',photo_file='',created_at='',updated_at='',guest_expires_at=0,
+           removed_at=? WHERE uid=?""",
+        ("removed:" + uid, now_iso(), uid),
+    )
+    if photo and database.POSTGRES:
+        db.execute("DELETE FROM profile_photos WHERE filename=?", (photo,))
+    elif photo:
+        (PHOTOS / photo).unlink(missing_ok=True)
     for tournament in affected:
         refresh_bracket(db, tournament["tournament_id"])
         final = db.execute(
@@ -1547,12 +1746,14 @@ def refresh_bracket(db: sqlite3.Connection, tournament_id: str) -> None:
             "in_progress",
         ):
             continue
+        feeder = """SELECT COALESCE(m.uid,'') AS winner_uid, tm.status FROM tournament_matches tm
+                    LEFT JOIN members m ON m.uid=tm.winner_uid AND m.removed_at='' WHERE tm.id=?"""
         left = db.execute(
-            "SELECT winner_uid,status FROM tournament_matches WHERE id=?",
+            feeder,
             (row["source_a_match_id"],),
         ).fetchone()
         right = db.execute(
-            "SELECT winner_uid,status FROM tournament_matches WHERE id=?",
+            feeder,
             (row["source_b_match_id"],),
         ).fetchone()
         left_done = bool(left and left["status"] in terminal)
@@ -1649,15 +1850,29 @@ def send_match_alert(recipients: set[str], game_id: str, title: str, body: str) 
         )
 
 
+class OfficePoolServer(ThreadingHTTPServer):
+    next_guest_cleanup = 0.0
+
+    def service_actions(self):
+        now = time.monotonic()
+        if now < self.next_guest_cleanup:
+            return
+        self.next_guest_cleanup = now + 30
+        try:
+            with DB_LOCK, connect_db() as db:
+                expire_guests(db)
+        except Exception as error:
+            print("Guest cleanup failed:", type(error).__name__)
+
+
 def main() -> None:
     init_db()
-    httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    httpd = OfficePoolServer((HOST, PORT), Handler)
     print(f"Office Pool server listening on http://{HOST}:{PORT}")
     if not ON_RENDER:
         print(
             "The API listens locally by default. Use Tailscale Funnel for a shared HTTPS address."
         )
-    print(f"Office email domain: @{CONFIG['office_domain']}")
     print(
         "Keep this window open while the PC is hosting the league. Press Ctrl+C to stop."
     )

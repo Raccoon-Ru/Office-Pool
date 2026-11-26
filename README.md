@@ -14,6 +14,10 @@ Home shows pool table availability, who is playing, your next league matchup, in
 
 The phone runs a foreground inbox service to check for invitations and result confirmations while Cue Club is closed. Android shows an ongoing notification while this service is active. This uses additional battery and requires notification permission. After a device reboot, the service starts again after the app has been opened and notifications are allowed.
 
+For doubles, tap **Start a 2v2** on Home and choose a teammate and two opponents. The timer starts once all three invitees accept. The result is confirmed when all four players agree on the winning team. Doubles results appear under **Results → 2v2** and count toward separate profile stats. They do not affect Elo or league brackets.
+
+Guest accounts expire 24 hours after sign-up and can play casual 1v1 and 2v2. When a guest is removed, their profile and visible match history are removed. Confirmed 1v1 games still contribute to Elo. The administrator can remove a player from their profile. Confirmed employee results remain visible under “Former player,” preserving the other players’ stats.
+
 ## Office leagues
 
 Only the configured admin account can open **Manage office league** from Home. Enter a league name and select an end date. Starting the league randomly draws every registered profile into a single-elimination bracket and assigns byes when needed. Players who register after the draw can join the next league.
@@ -34,7 +38,7 @@ Server data and profile photos are stored under `server/data`. The Windows task 
 
 ## iPhone Home Screen app
 
-Open the Cue Club web link in Safari, tap **Share**, then **Add to Home Screen**. Choose **Open as Web App** when Safari shows that option. Open Cue Club from the new icon and sign in with your existing office account or create a profile with your work email, display name, and a password. iPhone and Android use the same profiles, matches, and standings.
+Open the Cue Club web link in Safari, tap **Share**, then **Add to Home Screen**. Choose **Open as Web App** when Safari shows that option. Open Cue Club from the new icon and sign in with your existing account or create a profile with your email address, display name, and a password. iPhone and Android use the same profiles, matches, and standings.
 
 After installing, tap **Enable match alerts** on Home to grant notification permission. The Home Screen app uses Apple Web Push for invitations and result updates. Its page can reopen offline, but sign-in, profile changes, and match actions need the office PC to be reachable.
 
@@ -49,7 +53,7 @@ Configure the existing Render service from the repository root.
 - Build command `python -m pip install -r server/requirements-render.txt`
 - Start command `python -m server.office_pool_server`
 - Health check path `/health`
-- Environment `DATABASE_URL` from Supabase **Connect > Session pooler**, with your database password filled in. Optionally configure `OFFICE_POOL_ADMIN_EMAIL` and `OFFICE_POOL_DOMAIN` if they differ from the current office settings. The configured administrator address is reserved from self-registration.
+- Environment `DATABASE_URL` from Supabase **Connect > Session pooler**, with your database password filled in. Set `OFFICE_POOL_ADMIN_EMAIL` if the administrator address differs from the default. That address is reserved from self-registration.
 - Use an always-on Render service plan if instant availability is required. The Render free plan can sleep while idle.
 
 The server uses Render's `PORT`, enables the iPhone web app at `/cue-club/`, and checks the database on `/health`. PostgreSQL connections verify the TLS certificate against the system or configured CA bundle. To use a Supabase CA file, set `OFFICE_POOL_DB_SSLROOTCERT` to its path on Render.
