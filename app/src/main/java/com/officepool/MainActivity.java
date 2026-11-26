@@ -3341,7 +3341,7 @@ public class MainActivity extends Activity {
             dialog.dismiss();
             if (!value.equals(sessionName)) saveProfileName(value);
             else if (photoChanged) {
-                show();
+                MainActivity.this.show();
                 syncNow();
             } else return;
             toast(online ? "Profile saved." : "Profile saved on this phone · waiting to sync");
