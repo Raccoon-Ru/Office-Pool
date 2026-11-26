@@ -262,11 +262,33 @@ function invite(opponent, matchId = "") {
   dialog.insertBefore(send, dialog.lastChild);
 }
 function challenge() {
-  const people = data.members.filter(member => member.uid !== uid);
+  const people = data.members.filter(member => member.uid !== uid)
+    .sort((first, second) => first.displayName.localeCompare(second.displayName));
   if (!people.length) { toast("Coworkers appear here after registering."); return; }
-  const select = el("select", {}, people.map(member => el("option", {value:member.uid}, member.displayName)));
-  const dialog = prompt("Challenge a player to 1v1", el("label", {}, "Opponent", select),
-    button("Continue", () => { dialog.close(); invite(byMember(select.value)); }, true));
+  const [searchField, search] = field("Search players", {type:"search", autocomplete:"off"});
+  const players = people.map(member => {
+    const row = button("", () => { dialog.close(); invite(member); }, false,
+      {class:"opponent-row", "aria-label":member.displayName});
+    row.append(avatar(member), el("span", {}, member.displayName),
+      el("span", {"aria-hidden":"true"}, "›"));
+    return row;
+  });
+  const empty = el("p", {class:"muted opponent-empty", role:"status", hidden:true}, "No players match your search.");
+  const roster = el("div", {class:"opponent-list"}, ...players, empty);
+  const title = el("h2", {id:"opponent-picker-title", tabindex:-1, autofocus:true}, "Choose an opponent");
+  const dialog = el("dialog", {class:"opponent-picker", "aria-labelledby":title.id},
+    title, searchField, roster, button("Cancel", () => dialog.close()));
+  dialog.addEventListener("close", () => dialog.remove(), {once:true});
+  search.addEventListener("input", () => {
+    const query = search.value.trim().toLocaleLowerCase();
+    players.forEach((row, index) => {
+      row.hidden = !people[index].displayName.toLocaleLowerCase().includes(query);
+    });
+    empty.hidden = players.some(row => !row.hidden);
+    roster.scrollTop = 0;
+  });
+  document.body.append(dialog);
+  dialog.showModal();
 }
 function claimNextUp() {
   const people = data.members.filter(member => member.uid !== uid);

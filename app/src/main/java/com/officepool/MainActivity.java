@@ -2379,23 +2379,98 @@ public class MainActivity extends Activity {
             toast("Coworkers appear here after they create their office profiles.");
             return;
         }
-        LinearLayout form = vertical();
-        pad(form, 4, 4, 4, 4);
-        form.addView(text("CHALLENGE A COWORKER", 11, MUTED, true));
-        Spinner spinner = new Spinner(this);
-        ArrayList<String> names = new ArrayList<>();
-        for (OfficeMember m : choices) names.add(m.name);
-        spinner.setAdapter(
-                new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names));
-        form.addView(spinner);
-        new AlertDialog.Builder(this)
-                .setTitle("Send a game challenge")
-                .setView(form)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton(
-                        "Send invite",
-                        (d, w) -> createInvite(choices.get(spinner.getSelectedItemPosition())))
-                .show();
+        Collections.sort(choices, (first, second) -> first.name.compareToIgnoreCase(second.name));
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout panel = vertical();
+        pad(panel, 20, 18, 20, 16);
+        GradientDrawable surface = shape(CARD, 24);
+        surface.setStroke(dp(1), LINE);
+        panel.setBackground(surface);
+        panel.setFocusableInTouchMode(true);
+        panel.addView(text("Choose an opponent", 22, INK, true));
+        panel.addView(spacer(10));
+        EditText search = input("Search players", false);
+        search.setContentDescription("Search players");
+        GradientDrawable field = shape(BG, 12);
+        field.setStroke(dp(1), LINE);
+        search.setBackground(field);
+        pad(search, 12, 0, 12, 0);
+        panel.addView(search, lp(-1, 48));
+        panel.addView(spacer(8));
+
+        FrameLayout roster = new FrameLayout(this);
+        ListView list = new ListView(this);
+        list.setDivider(null);
+        roster.addView(list, new FrameLayout.LayoutParams(-1, -1));
+        TextView empty = text("No players match your search.", 14, MUTED, false);
+        empty.setGravity(Gravity.CENTER);
+        roster.addView(empty, new FrameLayout.LayoutParams(-1, -1));
+        list.setEmptyView(empty);
+        panel.addView(roster, new LinearLayout.LayoutParams(-1, 0, 1));
+        ArrayList<OfficeMember> visible = new ArrayList<>(choices);
+        ArrayAdapter<OfficeMember> adapter = new ArrayAdapter<OfficeMember>(
+                this, android.R.layout.simple_list_item_1, visible) {
+            @Override
+            public View getView(int position, View unused, ViewGroup parent) {
+                OfficeMember player = getItem(position);
+                LinearLayout row = horizontal();
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                pad(row, 6, 7, 8, 7);
+                row.setMinimumHeight(dp(60));
+                row.addView(avatar(player.name, player), lp(42, 42));
+                TextView name = text(player.name, 15, INK, true);
+                LinearLayout.LayoutParams namePosition = new LinearLayout.LayoutParams(0, -2, 1);
+                namePosition.leftMargin = dp(12);
+                row.addView(name, namePosition);
+                row.addView(text("›", 23, MUTED, false));
+                return row;
+            }
+        };
+        list.setAdapter(adapter);
+        search.addTextChangedListener(new android.text.TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                String query = s.toString().trim().toLowerCase(Locale.ROOT);
+                visible.clear();
+                for (OfficeMember player : choices) {
+                    if (player.name.toLowerCase(Locale.ROOT).contains(query)) visible.add(player);
+                }
+                adapter.notifyDataSetChanged();
+                list.setSelection(0);
+            }
+
+            @Override
+            public void afterTextChanged(android.text.Editable s) {}
+        });
+        TextView cancel = secondaryProfileButton("Cancel");
+        cancel.setOnClickListener(view -> dialog.dismiss());
+        panel.addView(cancel, lp(-1, -2));
+        list.setOnItemClickListener((parent, view, position, id) -> {
+            OfficeMember opponent = adapter.getItem(position);
+            dialog.dismiss();
+            new AlertDialog.Builder(this)
+                    .setTitle("Send 1v1 invitation?")
+                    .setMessage("Invite " + opponent.name + ". The match starts when they accept.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Send invite", (confirmation, button) -> createInvite(opponent))
+                    .show();
+        });
+        dialog.setContentView(panel);
+        dialog.show();
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+            window.setLayout(Math.min(getResources().getDisplayMetrics().widthPixels - dp(32), dp(420)),
+                    Math.min(getResources().getDisplayMetrics().heightPixels * 3 / 4,
+                            dp(Math.min(choices.size(), 5) * 60 + 160)));
+            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
+                    | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        }
+        panel.requestFocus();
     }
 
     void createInvite(OfficeMember opponent) {
