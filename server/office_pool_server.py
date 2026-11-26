@@ -81,19 +81,9 @@ def now_iso() -> str:
 
 
 def get_config() -> dict:
-    join_code = os.environ.get("OFFICE_POOL_JOIN_CODE")
-    if ON_RENDER and (not database.POSTGRES or not join_code):
-        raise RuntimeError("Render requires DATABASE_URL and OFFICE_POOL_JOIN_CODE.")
-    if CONFIG_FILE.is_file():
-        cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    elif join_code:
-        cfg = {}
-    else:
-        cfg = {"office_domain": "acumensoft.net", "join_code": secrets.token_urlsafe(8)}
-        CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-        print("Created server_config.json with a new office join code.")
-    if join_code:
-        cfg["join_code"] = join_code
+    if ON_RENDER and not database.POSTGRES:
+        raise RuntimeError("Render requires DATABASE_URL.")
+    cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8")) if CONFIG_FILE.is_file() else {}
     cfg["office_domain"] = (
         os.environ.get(
             "OFFICE_POOL_DOMAIN", str(cfg.get("office_domain", "acumensoft.net"))
@@ -913,12 +903,11 @@ class Handler(BaseHTTPRequestHandler):
         email = str(data.get("email", "")).strip().lower()
         name = str(data.get("displayName", "")).strip()
         password = str(data.get("password", ""))
-        code = str(data.get("joinCode", ""))
-        domain = CONFIG["office_domain"]
-        if not email.endswith("@" + domain):
-            raise ValueError("Use your verified office email address.")
-        if not hmac.compare_digest(code, str(CONFIG.get("join_code", ""))):
-            raise ValueError("The office join code is not correct.")
+        local, _, domain = email.partition("@")
+        if not local or any(char.isspace() for char in email) or domain != CONFIG["office_domain"]:
+            raise ValueError("Use your office email address.")
+        if email == ADMIN_EMAIL:
+            raise ValueError("This address is reserved for the office administrator.")
         if not 1 <= len(name) <= 48:
             raise ValueError("Name must be between 1 and 48 characters.")
         if len(password) < 8:
@@ -928,12 +917,11 @@ class Handler(BaseHTTPRequestHandler):
         stamp = now_iso()
         with DB_LOCK, connect_db() as db:
             db.execute(
-                "INSERT INTO members(uid,email,display_name,is_admin,password_salt,password_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO members(uid,email,display_name,password_salt,password_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
                 (
                     uid,
                     email,
                     name,
-                    int(email == ADMIN_EMAIL),
                     salt,
                     digest,
                     stamp,

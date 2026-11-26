@@ -756,10 +756,6 @@ public class MainActivity extends Activity {
             EditText em = input("name@acumensoft.net", true);
             form.addView(em, lp(-1, 52));
             form.addView(spacer(8));
-            form.addView(lineLabel("OFFICE JOIN CODE"));
-            EditText code = input("Ask the server owner for the code", false);
-            form.addView(code, lp(-1, 52));
-            form.addView(spacer(8));
             form.addView(lineLabel("PASSWORD"));
             EditText pw = input("At least 8 characters", true);
             pw.setInputType(129);
@@ -773,8 +769,7 @@ public class MainActivity extends Activity {
                         register(
                                 em.getText().toString().trim(),
                                 pw.getText().toString(),
-                                nm.getText().toString().trim(),
-                                code.getText().toString().trim());
+                                nm.getText().toString().trim());
                     });
         } else {
             form.addView(lineLabel("OFFICE EMAIL"));
@@ -859,13 +854,13 @@ public class MainActivity extends Activity {
                 });
     }
 
-    void register(String email, String password, String name, String joinCode) {
+    void register(String email, String password, String name) {
         if (!email.toLowerCase(Locale.ROOT).endsWith(WORK_DOMAIN)) {
             toast("Use your @acumensoft.net work email.");
             return;
         }
-        if (name.trim().isEmpty() || password.length() < 8 || joinCode.trim().isEmpty()) {
-            toast("Enter your name, join code, and a password with at least 8 characters.");
+        if (name.trim().isEmpty() || password.length() < 8) {
+            toast("Enter your name and a password with at least 8 characters.");
             return;
         }
         String base = serverUrl;
@@ -881,8 +876,7 @@ public class MainActivity extends Activity {
                                         new JSONObject()
                                                 .put("email", email)
                                                 .put("password", password)
-                                                .put("displayName", name)
-                                                .put("joinCode", joinCode));
+                                                .put("displayName", name));
                         onAuthSuccess(result);
                     } catch (Exception e) {
                         runOnUiThread(() -> toast(errorText(e)));

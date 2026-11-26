@@ -34,7 +34,7 @@ Server data and profile photos are stored under `server/data`. The Windows task 
 
 ## iPhone Home Screen app
 
-Open the Cue Club web link in Safari, tap **Share**, then **Add to Home Screen**. Choose **Open as Web App** when Safari shows that option. Open Cue Club from the new icon and sign in with your existing office account or create a profile with the office join code. iPhone and Android use the same profiles, matches, and standings.
+Open the Cue Club web link in Safari, tap **Share**, then **Add to Home Screen**. Choose **Open as Web App** when Safari shows that option. Open Cue Club from the new icon and sign in with your existing office account or create a profile with your work email, display name, and a password. iPhone and Android use the same profiles, matches, and standings.
 
 After installing, tap **Enable match alerts** on Home to grant notification permission. The Home Screen app uses Apple Web Push for invitations and result updates. Its page can reopen offline, but sign-in, profile changes, and match actions need the office PC to be reachable.
 
@@ -49,7 +49,7 @@ Configure the existing Render service from the repository root.
 - Build command `python -m pip install -r server/requirements-render.txt`
 - Start command `python -m server.office_pool_server`
 - Health check path `/health`
-- Environment `DATABASE_URL` from Supabase **Connect > Session pooler**, with your database password filled in, and `OFFICE_POOL_JOIN_CODE` set to the office join code. Optionally configure `OFFICE_POOL_ADMIN_EMAIL` and `OFFICE_POOL_DOMAIN` if they differ from the current office settings.
+- Environment `DATABASE_URL` from Supabase **Connect > Session pooler**, with your database password filled in. Optionally configure `OFFICE_POOL_ADMIN_EMAIL` and `OFFICE_POOL_DOMAIN` if they differ from the current office settings. The configured administrator address is reserved from self-registration.
 - Use an always-on Render service plan if instant availability is required. The Render free plan can sleep while idle.
 
 The server uses Render's `PORT`, enables the iPhone web app at `/cue-club/`, and checks the database on `/health`. PostgreSQL connections verify the TLS certificate against the system or configured CA bundle. To use a Supabase CA file, set `OFFICE_POOL_DB_SSLROOTCERT` to its path on Render.

@@ -194,14 +194,13 @@ function signInScreen() {
   const [passwordField, password] = field("Password", {type:"password", required:true,
     autocomplete:signingUp ? "new-password" : "current-password", minlength:signingUp ? 8 : null});
   const [nameField, name] = field("Display name", {required:true, maxlength:48, autocomplete:"name"});
-  const [codeField, code] = field("Office join code", {required:true, autocomplete:"off"});
   const submit = el("button", {class:"primary", type:"submit"}, signingUp ? "Create profile" : "Sign in");
   const form = el("form", {onsubmit:async event => {
     event.preventDefault();
     submit.disabled = true;
     try {
       const credentials = {email:email.value.trim(), password:password.value};
-      if (signingUp) Object.assign(credentials, {displayName:name.value.trim(), joinCode:code.value.trim()});
+      if (signingUp) credentials.displayName = name.value.trim();
       const result = await api(signingUp ? "/auth/register" : "/auth/login", "POST", credentials);
       token = result.token;
       uid = result.member.uid;
@@ -210,7 +209,7 @@ function signInScreen() {
       render();
       await sync();
     } catch (error) { toast(error.message); } finally { submit.disabled = false; }
-  }}, emailField, signingUp && nameField, signingUp && codeField, passwordField, submit);
+  }}, emailField, signingUp && nameField, passwordField, submit);
   app.append(el("h1", {}, signingUp ? "Join Cue Club" : "Welcome to Cue Club"),
     muted("Use your office account to play across iPhone and Android."), card(form),
     button(signingUp ? "Already registered? Sign in" : "Create an office profile", () => { signingUp = !signingUp; render(); }));
